@@ -1,0 +1,170 @@
+import com.vanniktech.maven.publish.SonatypeHost
+
+buildscript {
+  dependencies {
+    classpath 'com.palantir.javaformat:gradle-palantir-java-format:2.72.0'
+  }
+}
+
+plugins {
+  id 'java-library'
+  id 'com.google.protobuf' version '0.9.4'
+  id 'maven-publish'
+  id 'signing'
+  id 'jacoco'
+  id 'com.diffplug.spotless' version '6.25.0'
+  id 'com.vanniktech.maven.publish' version '0.33.0'
+}
+
+allprojects {
+  apply plugin: 'com.palantir.java-format'
+}
+
+group = 'io.github.panghy'
+version = '0.1.0-SNAPSHOT'
+
+java {
+  sourceCompatibility = JavaVersion.VERSION_17
+  targetCompatibility = JavaVersion.VERSION_17
+  toolchain {
+    languageVersion = JavaLanguageVersion.of(17)
+  }
+}
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  // FoundationDB
+  implementation 'org.foundationdb:fdb-java:7.3.27'
+  
+  // Protobuf
+  implementation 'com.google.protobuf:protobuf-java:4.28.2'
+  
+  // Testing
+  testImplementation 'junit:junit:4.13.2'
+}
+
+protobuf {
+  protoc {
+    artifact = 'com.google.protobuf:protoc:3.25.1'
+  }
+}
+
+sourceSets {
+  main {
+    proto {
+      srcDir 'src/main/proto'
+    }
+  }
+}
+
+test {
+  useJUnit()
+}
+
+// Ensure proto compilation happens before Java compilation
+compileJava.dependsOn 'generateProto'
+
+// Handle duplicate proto files in resources
+tasks.processResources {
+  duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+// Spotless configuration with Palantir Java Format
+spotless {
+  java {
+    target 'src/**/*.java'
+    targetExclude 'build/**'
+    indentWithTabs(4)
+    indentWithSpaces(2)
+    removeUnusedImports()
+    trimTrailingWhitespace()
+    endWithNewline()
+  }
+}
+
+// JaCoCo configuration
+jacoco {
+  toolVersion = "0.8.13"
+}
+
+test {
+  useJUnit()
+  finalizedBy jacocoTestReport
+}
+
+jacocoTestReport {
+  dependsOn test
+  reports {
+    xml.required = true
+    html.required = true
+  }
+  afterEvaluate {
+    classDirectories.setFrom(files(classDirectories.files.collect {
+      fileTree(dir: it, exclude: [
+        '**/proto/**',  // Exclude generated protobuf classes
+      ])
+    }))
+  }
+}
+
+jacocoTestCoverageVerification {
+  afterEvaluate {
+    classDirectories.setFrom(files(classDirectories.files.collect {
+      fileTree(dir: it, exclude: [
+        '**/proto/**',  // Exclude generated protobuf classes
+      ])
+    }))
+  }
+  violationRules {
+    rule {
+      limit {
+        counter = 'LINE'
+        value = 'COVEREDRATIO'
+        minimum = 0.80 // 80% line coverage
+      }
+      limit {
+        counter = 'BRANCH'
+        value = 'COVEREDRATIO'
+        minimum = 0.70 // 70% branch coverage
+      }
+    }
+  }
+}
+
+check.dependsOn jacocoTestCoverageVerification
+
+// Maven publishing configuration
+mavenPublishing {
+  publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
+  signAllPublications()
+  
+  pom {
+    name = 'TaskQueue'
+    description = 'A distributed task queue library backed by FoundationDB'
+    url = 'https://github.com/panghy/taskqueue'
+    
+    licenses {
+      license {
+        name = 'The Apache License, Version 2.0'
+        url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+      }
+    }
+    
+    developers {
+      developer {
+        id = 'panghy'
+        name = 'Clement Pang'
+        email = 'panghy@users.noreply.github.com'
+      }
+    }
+    
+    scm {
+      connection = 'scm:git:git://github.com/panghy/taskqueue.git'
+      developerConnection = 'scm:git:ssh://github.com:panghy/taskqueue.git'
+      url = 'https://github.com/panghy/taskqueue'
+    }
+  }
+}
