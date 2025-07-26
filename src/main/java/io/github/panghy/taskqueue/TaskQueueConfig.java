@@ -1,7 +1,6 @@
 package io.github.panghy.taskqueue;
 
 import com.apple.foundationdb.tuple.Tuple;
-
 import java.time.Duration;
 import java.util.Objects;
 
@@ -146,8 +145,7 @@ public class TaskQueueConfig<K, T> {
     private TaskSerializer<K> keySerializer;
     private TaskSerializer<T> taskSerializer;
 
-    private Builder() {
-    }
+    private Builder() {}
 
     /**
      * Sets the key prefix for the task queue.
