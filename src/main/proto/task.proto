@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package io.github.panghy.taskqueue.proto;
+
+option java_package = "io.github.panghy.taskqueue.proto";
+option java_multiple_files = true;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+
+// Task represents a unit of work in the task queue system that allows for FIFO
+// processing by workers. TTL controls how long a task is expected to be owned
+// by a worker, after which it becomes visible again for another worker to pick
+// it up. Workers can refresh the lease (pushing out the expiration time).
+message Task {
+  // Unique identifier for the task (UUID stored as 16 bytes)
+  bytes task_uuid = 1;
+  
+  // When the task was created
+  google.protobuf.Timestamp creation_time = 2;
+  
+  // Time-to-live for the task - controls how long a worker owns the task
+  google.protobuf.Duration ttl = 3;
+  
+  // Task key tuple - supports at-most-one task per taskKey semantics
+  bytes task_key = 4;
+  
+  // Task version for schema evolution
+  int64 task_version = 5;
+  
+  // Current claim UUID (16 bytes) - indicates task ownership
+  bytes claim = 6;
+  
+  // Number of processing attempts
+  int64 attempts = 7;
+}
+
+// TaskKey represents the actual task data and execution parameters.
+// expectedExecutionTime tracks the delay (if requested) from the perspective
+// of when the task was submitted, not when it was picked up.
+//
+// throttle controls how often a task should be scheduled for a particular
+// taskKey. If there are rapid submissions for a single taskKey, we only allow
+// an execution per throttle duration (with some randomization).
+message TaskKey {
+  // Unique identifier for the task (UUID stored as 16 bytes)
+  bytes task_uuid = 1;
+  
+  // When the task was created
+  google.protobuf.Timestamp creation_time = 2;
+  
+  // Time-to-live for the task
+  google.protobuf.Duration ttl = 3;
+  
+  // Expected execution time - tracks delay from submission time
+  google.protobuf.Timestamp expected_execution_time = 4;
+  
+  // Throttle duration - controls execution frequency per taskKey
+  google.protobuf.Duration throttle = 5;
+  
+  // Task payload - the actual task data
+  bytes task = 6;
+}
+
+// TaskKeyMetadata tracks metadata about a task key.
+// Tracks the highest known task version for a task key. This is kept internally
+// so new tasks for a taskKey are upserted with the right task version.
+//
+// When a task finishes execution, it checks if there is a newer version of the
+// task to execute and schedules a new task for execution immediately.
+//
+// There should only ever be one version of a task executing. currentClaim
+// tracks that. We may skip versions if many are submitted; in that case, the
+// running task will submit a new task for execution with the latest version.
+message TaskKeyMetadata {
+  // Highest version seen for this task key
+  int64 highest_version_seen = 1;
+  
+  // Current claim UUID (16 bytes) - tracks executing task version
+  bytes current_claim = 2;
+}
