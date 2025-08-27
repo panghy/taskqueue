@@ -51,4 +51,9 @@ public class SimpleTaskQueueWrapper<T> implements SimpleTaskQueue<T> {
   public CompletableFuture<Void> failTask(Transaction tr, TaskClaim<UUID, T> taskClaim) {
     return taskQueue.failTask(tr, taskClaim);
   }
+
+  @Override
+  public CompletableFuture<Void> extendTtl(Transaction tr, TaskClaim<UUID, T> taskClaim, Duration extension) {
+    return taskQueue.extendTtl(tr, taskClaim, extension);
+  }
 }
