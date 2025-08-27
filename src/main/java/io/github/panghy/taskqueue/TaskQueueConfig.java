@@ -6,6 +6,7 @@ import com.google.protobuf.ByteString;
 import java.time.Duration;
 import java.time.InstantSource;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.function.Function;
 import lombok.Getter;
 
@@ -116,14 +117,14 @@ public class TaskQueueConfig<K, T> {
   }
 
   /**
-   * Creates a new builder for TaskQueueConfig with {@link java.lang.String} keys.
+   * Creates a new builder for TaskQueueConfig with auto-generated {@link UUID} keys.
    *
    * @param <T> the type of task data
    * @return a new builder instance
    */
-  public static <T> Builder<String, T> builder(
+  public static <T> Builder<UUID, T> builder(
       Database database, Directory directory, TaskSerializer<T> taskSerializer) {
-    return new Builder<>(database, directory, new StringSerializer(), taskSerializer);
+    return new Builder<>(database, directory, new UUIDSerializer(), taskSerializer);
   }
 
   /**
