@@ -60,7 +60,7 @@ class TaskQueuesTest {
 
   @Test
   void testCreateSimpleTaskQueue() throws ExecutionException, InterruptedException {
-    TaskQueueConfig<UUID, String> config = TaskQueueConfig.<String>builder(
+    TaskQueueConfig<UUID, String> config = TaskQueueConfig.builder(
             database, directory, new StringSerializer())
         .defaultTtl(Duration.ofMinutes(5))
         .maxAttempts(3)
