@@ -117,7 +117,7 @@ public class TaskQueueConfig<K, T> {
   }
 
   /**
-   * Creates a new builder for TaskQueueConfig with auto-generated {@link UUID} keys.
+   * Creates a new builder for TaskQueueConfig with {@link UUID} keys.
    *
    * @param <T> the type of task data
    * @return a new builder instance
