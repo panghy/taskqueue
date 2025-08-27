@@ -8,8 +8,7 @@ import java.util.concurrent.CompletableFuture;
  */
 public abstract class TaskQueues {
 
-  private TaskQueues() {
-  }
+  private TaskQueues() {}
 
   /**
    * Creates a keyed task queue. This supports deduplication of tasks based on a key.
