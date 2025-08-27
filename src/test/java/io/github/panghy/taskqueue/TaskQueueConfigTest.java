@@ -1,19 +1,61 @@
 package io.github.panghy.taskqueue;
 
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
-import com.apple.foundationdb.tuple.Tuple;
+import com.apple.foundationdb.Database;
+import com.apple.foundationdb.FDB;
+import com.apple.foundationdb.directory.DirectoryLayer;
+import com.apple.foundationdb.directory.DirectorySubspace;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import org.junit.Test;
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
-public class TaskQueueConfigTest {
+class TaskQueueConfigTest {
+
+  Database db;
+  DirectorySubspace directory;
+  TaskQueueConfig<String, String> config;
+  AtomicLong simulatedTime = new AtomicLong(0);
+
+  @BeforeEach
+  void setup() throws ExecutionException, InterruptedException, TimeoutException {
+    db = FDB.selectAPIVersion(730).open();
+    directory = db.runAsync(tr -> {
+          DirectoryLayer layer = DirectoryLayer.getDefault();
+          return layer.createOrOpen(
+              tr,
+              List.of("test", UUID.randomUUID().toString()),
+              "task_queue".getBytes(StandardCharsets.UTF_8));
+        })
+        .get(5, TimeUnit.SECONDS);
+    config = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .build();
+  }
+
+  @AfterEach
+  void tearDown() {
+    db.run(tr -> {
+      directory.remove(tr);
+      return null;
+    });
+    db.close();
+  }
 
   @Test
-  public void testBuilderDefaults() {
-    TaskQueueConfig<String, String> config = TaskQueueConfig.<String, String>builder()
-        .keyPrefix(Tuple.from("test"))
-        .keySerializer(new StringSerializer())
-        .taskSerializer(new StringSerializer())
+  void testBuilderDefaults() {
+    TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
         .build();
 
     assertEquals(Duration.ofMinutes(5), config.getDefaultTtl());
@@ -22,9 +64,10 @@ public class TaskQueueConfigTest {
   }
 
   @Test
-  public void testBuilderCustomValues() {
-    TaskQueueConfig<String, String> config = TaskQueueConfig.<String, String>builder()
-        .keyPrefix(Tuple.from("test"))
+  void testBuilderCustomValues() {
+    TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .directory(directory)
         .defaultTtl(Duration.ofMinutes(10))
         .maxAttempts(5)
         .defaultThrottle(Duration.ofSeconds(5))
@@ -37,79 +80,35 @@ public class TaskQueueConfigTest {
     assertEquals(Duration.ofSeconds(5), config.getDefaultThrottle());
   }
 
-  @Test(expected = NullPointerException.class)
-  public void testBuilderRequiresKeyPrefix() {
-    TaskQueueConfig.<String, String>builder()
-        .keySerializer(new StringSerializer())
-        .taskSerializer(new StringSerializer())
-        .build();
-  }
-
-  @Test(expected = IllegalArgumentException.class)
-  public void testInvalidMaxAttempts() {
-    TaskQueueConfig.<String, String>builder()
-        .keyPrefix(Tuple.from("test"))
+  @Test
+  void testInvalidMaxAttempts() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
         .maxAttempts(0)
-        .keySerializer(new StringSerializer())
-        .taskSerializer(new StringSerializer())
-        .build();
+        .build());
   }
 
-  @Test(expected = IllegalArgumentException.class)
-  public void testInvalidTtlZero() {
-    TaskQueueConfig.<String, String>builder()
-        .keyPrefix(Tuple.from("test"))
+  @Test
+  void testInvalidTtlZero() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
         .defaultTtl(Duration.ZERO)
-        .keySerializer(new StringSerializer())
-        .taskSerializer(new StringSerializer())
-        .build();
+        .build());
   }
 
-  @Test(expected = IllegalArgumentException.class)
-  public void testInvalidTtlNegative() {
-    TaskQueueConfig.<String, String>builder()
-        .keyPrefix(Tuple.from("test"))
+  @Test
+  void testInvalidTtlNegative() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
         .defaultTtl(Duration.ofMinutes(-1))
-        .keySerializer(new StringSerializer())
-        .taskSerializer(new StringSerializer())
-        .build();
+        .build());
   }
 
-  @Test(expected = IllegalArgumentException.class)
-  public void testInvalidThrottleNegative() {
-    TaskQueueConfig.<String, String>builder()
-        .keyPrefix(Tuple.from("test"))
+  @Test
+  void testInvalidThrottleNegative() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
         .defaultThrottle(Duration.ofSeconds(-1))
-        .keySerializer(new StringSerializer())
-        .taskSerializer(new StringSerializer())
-        .build();
-  }
-
-  @Test(expected = NullPointerException.class)
-  public void testBuilderRequiresKeySerializer() {
-    TaskQueueConfig.<String, String>builder()
-        .keyPrefix(Tuple.from("test"))
-        .taskSerializer(new StringSerializer())
-        .build();
-  }
-
-  @Test(expected = NullPointerException.class)
-  public void testBuilderRequiresTaskSerializer() {
-    TaskQueueConfig.<String, String>builder()
-        .keyPrefix(Tuple.from("test"))
-        .keySerializer(new StringSerializer())
-        .build();
-  }
-
-  private static class StringSerializer implements TaskQueueConfig.TaskSerializer<String> {
-    @Override
-    public byte[] serialize(String value) {
-      return value != null ? value.getBytes() : new byte[0];
-    }
-
-    @Override
-    public String deserialize(byte[] bytes) {
-      return bytes != null && bytes.length > 0 ? new String(bytes) : null;
-    }
+        .build());
   }
 }
