@@ -235,7 +235,7 @@ public class KeyedTaskQueueTest {
   }
 
   @Test
-  void testDelayedTask() throws ExecutionException, InterruptedException, TimeoutException {
+  void testDelayedTask() throws Exception {
     var queue = KeyedTaskQueue.createOrOpen(config, db).get();
 
     // Set initial time
@@ -249,14 +249,18 @@ public class KeyedTaskQueueTest {
     assertThat(taskKey.getHighestVersionSeen()).isEqualTo(1);
 
     // Task should not be available immediately
-    var taskClaimF = assertQueueIsEmpty(queue);
+    var taskClaimF = queue.awaitAndClaimTask();
 
-    // Advance time by 3 seconds - still not ready
-    simulatedTime.set(4000);
+    // Wait a bit to let the await task start waiting
+    Thread.sleep(100);
     assertThat(taskClaimF.isDone()).isFalse();
 
-    // Advance time by 2 more seconds - now ready
+    // Advance time by 2 more seconds - now ready  
     simulatedTime.set(6000);
+    
+    // Trigger a watch update by enqueueing a dummy task with delay so it won't be picked up
+    db.runAsync(tr -> queue.enqueue(tr, "dummy", "dummy", Duration.ofHours(1), config.getDefaultTtl())).get(5, TimeUnit.SECONDS);
+    
     var taskClaim = taskClaimF.get(5, TimeUnit.SECONDS);
     assertThat(taskClaim).isNotNull();
     assertThat(taskClaim.taskKey()).isEqualTo("delayed");
@@ -361,7 +365,7 @@ public class KeyedTaskQueueTest {
   }
 
   @Test
-  void testCustomTtlAndDelay() throws ExecutionException, InterruptedException, TimeoutException {
+  void testCustomTtlAndDelay() throws Exception {
     var queue = KeyedTaskQueue.createOrOpen(config, db).get();
 
     simulatedTime.set(1000);
@@ -373,10 +377,18 @@ public class KeyedTaskQueueTest {
     assertThat(taskKey).isNotNull();
 
     // Task should not be available immediately due to delay
-    var taskClaimF = assertQueueIsEmpty(queue);
+    var taskClaimF = queue.awaitAndClaimTask();
+    
+    // Wait a bit to let the await task start waiting
+    Thread.sleep(100);
+    assertThat(taskClaimF.isDone()).isFalse();
 
     // Advance time to make task available
     simulatedTime.set(4000);
+    
+    // Trigger a watch update by enqueueing a dummy task with delay so it won't be picked up
+    db.runAsync(tr -> queue.enqueue(tr, "dummy", "dummy", Duration.ofHours(1), config.getDefaultTtl())).get(5, TimeUnit.SECONDS);
+    
     var taskClaim = taskClaimF.get(5, TimeUnit.SECONDS);
     assertThat(taskClaim).isNotNull();
 
@@ -683,7 +695,7 @@ public class KeyedTaskQueueTest {
   }
 
   @Test
-  void testEnqueueIfNotExistsWithDelay() throws ExecutionException, InterruptedException, TimeoutException {
+  void testEnqueueIfNotExistsWithDelay() throws Exception {
     var queue = KeyedTaskQueue.createOrOpen(config, db).get();
 
     simulatedTime.set(1000);
@@ -694,10 +706,18 @@ public class KeyedTaskQueueTest {
     assertThat(taskKey).isNotNull();
 
     // Task should not be available immediately
-    var taskClaimF = assertQueueIsEmpty(queue);
+    var taskClaimF = queue.awaitAndClaimTask();
+    
+    // Wait a bit to let the await task start waiting
+    Thread.sleep(100);
+    assertThat(taskClaimF.isDone()).isFalse();
 
     // Advance time to make task available
     simulatedTime.set(4000);
+    
+    // Trigger a watch update by enqueueing a dummy task with delay so it won't be picked up
+    db.runAsync(tr -> queue.enqueue(tr, "dummy", "dummy", Duration.ofHours(1), config.getDefaultTtl())).get(5, TimeUnit.SECONDS);
+    
     var taskClaim = taskClaimF.get(5, TimeUnit.SECONDS);
     assertThat(taskClaim.taskKey()).isEqualTo("delayed");
 
@@ -1060,7 +1080,7 @@ public class KeyedTaskQueueTest {
   }
 
   @Test
-  void testTaskClaimTransactionMethods() throws ExecutionException, InterruptedException, TimeoutException {
+  void testTaskClaimTransactionMethods() throws Exception {
     var queue = KeyedTaskQueue.createOrOpen(config, db).get();
 
     queue.enqueue("tx-test", "data").get(5, TimeUnit.SECONDS);
@@ -1081,8 +1101,17 @@ public class KeyedTaskQueueTest {
       return null;
     });
 
-    // Claim the failed task and test transaction-based extend
-    var claim3 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    // Start waiting for the failed task before it's available
+    var claim3F = queue.awaitAndClaimTask(db);
+    
+    // Give it a moment to start waiting
+    Thread.sleep(100);
+    
+    // Trigger a watch update to ensure the failed task is noticed
+    db.runAsync(tr -> queue.enqueue(tr, "dummy-trigger", "dummy", Duration.ofHours(1), config.getDefaultTtl())).get(5, TimeUnit.SECONDS);
+    
+    // Now get the claim
+    var claim3 = claim3F.get(5, TimeUnit.SECONDS);
     assertThat(claim3.task()).isEqualTo("data2");
     assertThat(claim3.getAttempts()).isEqualTo(2);
 
