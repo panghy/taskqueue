@@ -292,8 +292,8 @@ public class KeyedTaskQueueTest {
     assertThat(reclaimedTask).isNotNull();
     assertThat(reclaimedTask.taskKey()).isEqualTo("expiring");
     assertThat(reclaimedTask.task()).isEqualTo("expiring-task");
-    // When a task is reclaimed due to expiration, it should be the same task but reclaimed
-    assertThat(reclaimedTask.taskProto().getAttempts()).isEqualTo(1);
+    // When a task is reclaimed due to expiration, it's a second attempt
+    assertThat(reclaimedTask.taskProto().getAttempts()).isEqualTo(2);
     // The task should be successfully reclaimed and completable
     assertThat(reclaimedTask.taskProto().getTaskUuid())
         .isEqualTo(taskClaim.taskProto().getTaskUuid());
@@ -668,8 +668,8 @@ public class KeyedTaskQueueTest {
     // Another worker should be able to reclaim
     var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
     assertThat(claim2.taskKey()).isEqualTo("short-lived");
-    // When a task is reclaimed due to expiration, it should be the same task but reclaimed
-    assertThat(claim2.taskProto().getAttempts()).isEqualTo(1);
+    // When a task is reclaimed due to expiration, it's a second attempt
+    assertThat(claim2.taskProto().getAttempts()).isEqualTo(2);
     // The task should be successfully reclaimed and completable
     assertThat(claim2.taskProto().getTaskUuid())
         .isEqualTo(claim1.taskProto().getTaskUuid());
