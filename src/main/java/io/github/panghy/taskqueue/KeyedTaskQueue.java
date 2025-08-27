@@ -519,9 +519,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             updatedTaskKeyMetadataProto.toByteArray());
         tr.set(taskKV.getKey(), updatedTaskProto.toByteArray());
         LOGGER.info("Reclaiming task: " + describeTask(taskUuid, taskObj) + " with claim: " + claimUuid);
-        return Optional.of(TaskClaim.<K, T>builder()
-            .taskProto(taskProto)
-            .taskKeyProto(lastestTaskKey)
+            .taskKeyProto(latestTaskKey)
             .taskKeyMetadataProto(taskKeyMetadataProto)
             .taskQueue(this)
             .taskKey(config.getKeySerializer().deserialize(taskKeyBytes))
