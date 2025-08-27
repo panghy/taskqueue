@@ -507,7 +507,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             .setTaskVersion(taskKeyMetadataProto.getHighestVersionSeen())
             .setAttempts(attempts)
             .build();
-        var deadline = config.getInstantSource().instant().plus(toJavaDuration(lastestTaskKey.getTtl()));
+        var deadline = config.getInstantSource().instant().plus(toJavaDuration(latestTaskKey.getTtl()));
         var updatedTaskKeyMetadataProto = taskKeyMetadataProto.toBuilder()
             .setCurrentClaim(TaskKeyMetadata.CurrentClaim.newBuilder()
                 .setClaim(claimUuidBytes)
