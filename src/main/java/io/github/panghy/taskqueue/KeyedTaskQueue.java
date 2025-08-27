@@ -75,7 +75,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
    * @param <T>     the type of the task data
    * @return a future that completes with the task queue
    */
-  public static <K, T> CompletableFuture<TaskQueue<K, T>> createOrOpen(
+  static <K, T> CompletableFuture<TaskQueue<K, T>> createOrOpen(
       TaskQueueConfig<K, T> config, TransactionContext context) {
     var unclaimedTaskF = config.getDirectory().createOrOpen(context, List.of("unclaimed_tasks"));
     var claimedTaskF = config.getDirectory().createOrOpen(context, List.of("claimed_tasks"));
