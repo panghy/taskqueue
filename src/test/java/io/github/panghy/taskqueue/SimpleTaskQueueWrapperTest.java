@@ -8,6 +8,7 @@ import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.InstantSource;
 import java.util.List;
 import java.util.UUID;
@@ -15,6 +16,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -77,6 +79,14 @@ class SimpleTaskQueueWrapperTest {
 
   @Test
   void testEnqueueWithDelay() throws ExecutionException, InterruptedException {
+    // Create a config with controlled time for testing delays
+    var testTime = new AtomicLong(1000);
+    var testConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(testTime.get()))
+        .defaultTtl(Duration.ofMinutes(5))
+        .build();
+    taskQueue = TaskQueues.createSimpleTaskQueue(testConfig).get();
+
     database.run(tr -> {
       try {
         taskQueue.enqueue(tr, "delayed-task", Duration.ofHours(1)).get();

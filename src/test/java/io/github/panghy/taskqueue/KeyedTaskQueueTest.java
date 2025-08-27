@@ -729,4 +729,187 @@ public class KeyedTaskQueueTest {
     claim2.complete();
     assertQueueIsEmpty(queue);
   }
+
+  @Test
+  void testFailTaskWithNewerVersionAvailable() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim first version
+    queue.enqueue("versioned", "v1").get(5, TimeUnit.SECONDS);
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim1.task()).isEqualTo("v1");
+
+    // Enqueue newer versions while first is being processed
+    queue.enqueue("versioned", "v2").get(5, TimeUnit.SECONDS);
+    queue.enqueue("versioned", "v3").get(5, TimeUnit.SECONDS);
+
+    // Fail the first version - should reschedule latest version (v3)
+    claim1.fail();
+
+    // Should get the latest version
+    var nextClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(nextClaim.task()).isEqualTo("v3");
+    assertThat(nextClaim.taskProto().getTaskVersion()).isEqualTo(3);
+    assertThat(nextClaim.taskProto().getAttempts()).isEqualTo(1); // Fresh attempt for v3
+
+    nextClaim.complete();
+    assertQueueIsEmpty(queue);
+  }
+
+  @Test
+  void testExpiredTaskWithNewerVersionAvailable() throws ExecutionException, InterruptedException, TimeoutException {
+    // Create config with very short TTL
+    var shortTtlConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .defaultTtl(Duration.ofSeconds(1))
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(shortTtlConfig, db).get();
+
+    simulatedTime.set(1000);
+
+    // Enqueue and claim first version
+    queue.enqueue("expiring", "v1").get(5, TimeUnit.SECONDS);
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim1.task()).isEqualTo("v1");
+
+    // Enqueue newer version while first is being processed
+    queue.enqueue("expiring", "v2").get(5, TimeUnit.SECONDS);
+
+    // Advance time to expire the first claim
+    simulatedTime.set(3000);
+
+    // Should reclaim with the newer version
+    var reclaimedTask = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(reclaimedTask.task()).isEqualTo("v2");
+    assertThat(reclaimedTask.taskProto().getTaskVersion()).isEqualTo(2);
+    assertThat(reclaimedTask.taskProto().getAttempts()).isEqualTo(1); // Fresh attempt for v2
+
+    reclaimedTask.complete();
+    assertQueueIsEmpty(queue);
+  }
+
+  @Test
+  void testCompleteTaskWithNoCurrentClaim() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim a task
+    queue.enqueue("test", "task").get(5, TimeUnit.SECONDS);
+    var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Complete the task
+    taskClaim.complete();
+
+    // Try to complete again after task is already completed
+    // This tests the edge case where metadata has no current claim
+    taskClaim.complete();
+
+    assertQueueIsEmpty(queue);
+  }
+
+  @Test
+  void testFailTaskWithNoCurrentClaim() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim a task
+    queue.enqueue("test", "task").get(5, TimeUnit.SECONDS);
+    var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Complete the task
+    taskClaim.complete();
+
+    // Try to fail after task is already completed
+    // This tests the edge case where metadata has no current claim
+    taskClaim.fail();
+
+    assertQueueIsEmpty(queue);
+  }
+
+  @Test
+  void testEnqueueIfNotExistsWithNoExistingTask() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Test enqueueIfNotExists when no task exists - should create new task
+    var taskKey = queue.enqueueIfNotExists("new", "task", Duration.ZERO, config.getDefaultTtl(), false)
+        .get(5, TimeUnit.SECONDS);
+    assertThat(taskKey).isNotNull();
+    assertThat(taskKey.getHighestVersionSeen()).isEqualTo(1);
+    assertThat(taskKey.hasCurrentClaim()).isFalse();
+
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim.taskKey()).isEqualTo("new");
+    assertThat(claim.task()).isEqualTo("task");
+
+    claim.complete();
+    assertQueueIsEmpty(queue);
+  }
+
+  @Test
+  void testExpiredTaskReclaimWithMaxAttemptsExactlyReached()
+      throws ExecutionException, InterruptedException, TimeoutException {
+    // Create config with max 2 attempts and short TTL
+    var limitedConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .defaultTtl(Duration.ofSeconds(1))
+        .maxAttempts(2)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(limitedConfig, db).get();
+
+    simulatedTime.set(1000);
+
+    // Enqueue task
+    queue.enqueue("expiring", "task").get(5, TimeUnit.SECONDS);
+
+    // First attempt - let it expire
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim1.taskProto().getAttempts()).isEqualTo(1);
+
+    // Advance time to expire
+    simulatedTime.set(2500);
+
+    // Second attempt (reclaim) - this reaches max attempts
+    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim2.taskProto().getAttempts()).isEqualTo(2);
+
+    // Let this one expire too
+    simulatedTime.set(4000);
+
+    // Task should be removed as max attempts reached
+    var noTaskF = assertQueueIsEmpty(queue);
+    assertThat(noTaskF.isDone()).isFalse();
+  }
+
+  @Test
+  void testTaskClaimWithNullTaskKey() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // This tests the null check in getTaskKeyAsync
+    queue.enqueue("test", "task").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim).isNotNull();
+
+    claim.complete();
+    assertQueueIsEmpty(queue);
+  }
+
+  @Test
+  void testMultipleWorkersCompetingForSameTask() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue a single task
+    queue.enqueue("single", "task").get(5, TimeUnit.SECONDS);
+
+    // First worker claims the task
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim1.taskKey()).isEqualTo("single");
+
+    // Second worker should wait (no more tasks)
+    var worker2F = queue.awaitAndClaimTask(db);
+    assertThat(worker2F.isDone()).isFalse();
+
+    // Complete the first task
+    claim1.complete();
+
+    // Second worker should still be waiting (no more tasks)
+    assertThat(worker2F.isDone()).isFalse();
+  }
 }
