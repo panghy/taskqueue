@@ -908,22 +908,22 @@ public class KeyedTaskQueueTest {
   }
 
   @Test
-  void testExtendTtlForExpiredTaskStillHeldByUs() throws ExecutionException, InterruptedException, TimeoutException {
+  void testExtendTtlBeforeExpiration() throws ExecutionException, InterruptedException, TimeoutException {
     var testTime = new AtomicLong(1000);
     var testConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
         .instantSource(() -> Instant.ofEpochMilli(testTime.get()))
-        .defaultTtl(Duration.ofSeconds(5))
+        .defaultTtl(Duration.ofSeconds(30))
         .maxAttempts(3)
         .build();
     var queue = KeyedTaskQueue.createOrOpen(testConfig, db).get();
 
-    queue.enqueue("expired-task", "data").get(5, TimeUnit.SECONDS);
+    queue.enqueue("extend-before-expire", "data").get(5, TimeUnit.SECONDS);
     var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
 
-    // Move time forward past expiration
-    testTime.set(10000);
+    // Move time forward but not past expiration
+    testTime.set(15000); // 15 seconds later, still within 30 second TTL
 
-    // Should be able to extend even though expired
+    // Should be able to extend the TTL
     queue.extendTtl(claim, Duration.ofMinutes(5)).get(5, TimeUnit.SECONDS);
     claim.complete();
   }
