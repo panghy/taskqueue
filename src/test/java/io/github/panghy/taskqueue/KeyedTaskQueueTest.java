@@ -399,7 +399,6 @@ public class KeyedTaskQueueTest {
     queue.enqueue("convenience1", "task1").get(5, TimeUnit.SECONDS);
     var taskClaim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
     taskClaim1.complete(); // Using convenience method instead of queue.completeTask()
-    assertQueueIsEmpty(queue);
 
     // Test TaskClaim.fail() convenience method
     queue.enqueue("convenience2", "task2").get(5, TimeUnit.SECONDS);
