@@ -484,7 +484,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           LOGGER.warning("Task " + printable(taskKV.getKey())
               + " has no current claim but is in claimed space. " + "Reclaiming.");
         }
-        T taskObj = config.getTaskSerializer().deserialize(lastestTaskKey.getTask());
+        T taskObj = config.getTaskSerializer().deserialize(latestTaskKey.getTask());
         UUID taskUuid = bytesToUuid(taskProto.getTaskUuid().toByteArray());
         LOGGER.info("Found expired claimed task: " + describeTask(taskUuid, taskObj));
         // reclaim the task using a new claim UUID.
@@ -519,6 +519,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             updatedTaskKeyMetadataProto.toByteArray());
         tr.set(taskKV.getKey(), updatedTaskProto.toByteArray());
         LOGGER.info("Reclaiming task: " + describeTask(taskUuid, taskObj) + " with claim: " + claimUuid);
+        return Optional.of(TaskClaim.<K, T>builder()
+            .taskProto(updatedTaskProto)
             .taskKeyProto(latestTaskKey)
             .taskKeyMetadataProto(taskKeyMetadataProto)
             .taskQueue(this)
