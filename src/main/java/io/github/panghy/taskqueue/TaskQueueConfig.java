@@ -1,8 +1,13 @@
 package io.github.panghy.taskqueue;
 
-import com.apple.foundationdb.tuple.Tuple;
+import com.apple.foundationdb.Database;
+import com.apple.foundationdb.directory.Directory;
+import com.google.protobuf.ByteString;
 import java.time.Duration;
+import java.time.InstantSource;
 import java.util.Objects;
+import java.util.function.Function;
+import lombok.Getter;
 
 /**
  * Configuration for a TaskQueue instance with type parameters for task key and task data.
@@ -11,20 +16,90 @@ import java.util.Objects;
  * @param <T> Type of the task data
  */
 public class TaskQueueConfig<K, T> {
-  private final Tuple keyPrefix;
+
+  /**
+   * -- GETTER --
+   * Gets the FoundationDB database for this task queue.
+   * This is used to perform all database operations.
+   */
+  @Getter
+  private final Database database;
+
+  /**
+   * -- GETTER --
+   * Gets the FoundationDB directory for this task queue.
+   * Data for this queue will be stored within this directory.
+   */
+  @Getter
+  private final Directory directory;
+  /**
+   * Gets the default time-to-live for tasks in this queue.
+   * This determines how long a worker has to process a task before it
+   * becomes available for other workers to claim.
+   */
+  @Getter
   private final Duration defaultTtl;
+  /**
+   * Gets the maximum number of attempts allowed for a task.
+   * After this many failed attempts, the task will not be retried.
+   */
+  @Getter
   private final int maxAttempts;
+  /**
+   * Gets the default throttle duration for tasks with the same key.
+   * This controls the minimum time between executions of tasks with
+   * identical task keys, preventing rapid re-execution.
+   */
+  @Getter
   private final Duration defaultThrottle;
+  /**
+   * -- GETTER --
+   * Gets the serializer for task keys.
+   * This is used to convert task key objects to/from byte arrays for storage.
+   */
+  @Getter
   private final TaskSerializer<K> keySerializer;
+  /**
+   * -- GETTER --
+   * Gets the serializer for task data.
+   * This is used to convert task data objects to/from byte arrays for storage.
+   */
+  @Getter
   private final TaskSerializer<T> taskSerializer;
+  /**
+   * -- GETTER --
+   * Gets the function to extract a name from a task.
+   * This is used to generate a human-readable name for tasks.
+   */
+  @Getter
+  private final Function<T, String> taskNameExtractor;
+  /**
+   * -- GETTER --
+   * Gets the estimated number of workers that will be processing tasks from this queue.
+   * This is used to determine the number of parallel scans to perform when looking for tasks.
+   */
+  @Getter
+  private final int estimatedWorkerCount;
+  /**
+   * -- GETTER --
+   * Gets the instant source for this queue.
+   * This is used to determine the current time for task expiration and other time-based operations.
+   */
+  @Getter
+  private final InstantSource instantSource;
 
   private TaskQueueConfig(Builder<K, T> builder) {
-    this.keyPrefix = Objects.requireNonNull(builder.keyPrefix, "keyPrefix must not be null");
+    this.database = Objects.requireNonNull(builder.database, "database must not be null");
+    this.directory = Objects.requireNonNull(builder.directory, "subspace must not be null");
     this.defaultTtl = Objects.requireNonNull(builder.defaultTtl, "defaultTtl must not be null");
     this.maxAttempts = builder.maxAttempts;
     this.defaultThrottle = Objects.requireNonNull(builder.defaultThrottle, "defaultThrottle must not be null");
     this.keySerializer = Objects.requireNonNull(builder.keySerializer, "keySerializer must not be null");
     this.taskSerializer = Objects.requireNonNull(builder.taskSerializer, "taskSerializer must not be null");
+    this.taskNameExtractor =
+        Objects.requireNonNull(builder.taskNameExtractor, "taskNameExtractor must not be null");
+    this.estimatedWorkerCount = builder.estimatedWorkerCount;
+    this.instantSource = Objects.requireNonNull(builder.instantSource, "instantSource must not be null");
 
     if (maxAttempts <= 0) {
       throw new IllegalArgumentException("maxAttempts must be positive");
@@ -35,68 +110,20 @@ public class TaskQueueConfig<K, T> {
     if (defaultThrottle.isNegative()) {
       throw new IllegalArgumentException("defaultThrottle must not be negative");
     }
+    if (estimatedWorkerCount <= 0) {
+      throw new IllegalArgumentException("estimatedWorkerCount must be positive");
+    }
   }
 
   /**
-   * Gets the FoundationDB key prefix tuple for this task queue.
-   * All keys for this queue will be prefixed with this tuple.
+   * Creates a new builder for TaskQueueConfig with {@link java.lang.String} keys.
    *
-   * @return the key prefix tuple
+   * @param <T> the type of task data
+   * @return a new builder instance
    */
-  public Tuple getKeyPrefix() {
-    return keyPrefix;
-  }
-
-  /**
-   * Gets the default time-to-live for tasks in this queue.
-   * This determines how long a worker has to process a task before it
-   * becomes available for other workers to claim.
-   *
-   * @return the default TTL duration
-   */
-  public Duration getDefaultTtl() {
-    return defaultTtl;
-  }
-
-  /**
-   * Gets the maximum number of attempts allowed for a task.
-   * After this many failed attempts, the task will not be retried.
-   *
-   * @return the maximum number of attempts
-   */
-  public int getMaxAttempts() {
-    return maxAttempts;
-  }
-
-  /**
-   * Gets the default throttle duration for tasks with the same key.
-   * This controls the minimum time between executions of tasks with
-   * identical task keys, preventing rapid re-execution.
-   *
-   * @return the default throttle duration
-   */
-  public Duration getDefaultThrottle() {
-    return defaultThrottle;
-  }
-
-  /**
-   * Gets the serializer for task keys.
-   * This is used to convert task key objects to/from byte arrays for storage.
-   *
-   * @return the task key serializer
-   */
-  public TaskSerializer<K> getKeySerializer() {
-    return keySerializer;
-  }
-
-  /**
-   * Gets the serializer for task data.
-   * This is used to convert task data objects to/from byte arrays for storage.
-   *
-   * @return the task data serializer
-   */
-  public TaskSerializer<T> getTaskSerializer() {
-    return taskSerializer;
+  public static <T> Builder<String, T> builder(
+      Database database, Directory directory, TaskSerializer<T> taskSerializer) {
+    return new Builder<>(database, directory, new StringSerializer(), taskSerializer);
   }
 
   /**
@@ -106,8 +133,9 @@ public class TaskQueueConfig<K, T> {
    * @param <T> the type of task data
    * @return a new builder instance
    */
-  public static <K, T> Builder<K, T> builder() {
-    return new Builder<>();
+  public static <K, T> Builder<K, T> builder(
+      Database database, Directory directory, TaskSerializer<K> keySerializer, TaskSerializer<T> taskSerializer) {
+    return new Builder<>(database, directory, keySerializer, taskSerializer);
   }
 
   /**
@@ -125,7 +153,7 @@ public class TaskQueueConfig<K, T> {
      * @return the serialized byte array
      * @throws IllegalArgumentException if the value cannot be serialized
      */
-    byte[] serialize(V value);
+    ByteString serialize(V value);
 
     /**
      * Deserializes a byte array back to the original value type.
@@ -134,24 +162,62 @@ public class TaskQueueConfig<K, T> {
      * @return the deserialized value (may be null)
      * @throws IllegalArgumentException if the bytes cannot be deserialized
      */
-    V deserialize(byte[] bytes);
+    V deserialize(ByteString bytes);
   }
 
   public static class Builder<K, T> {
-    private Tuple keyPrefix;
+    public Function<T, String> taskNameExtractor = Object::toString;
+    public int estimatedWorkerCount = 1;
+    public Database database;
+    private InstantSource instantSource = InstantSource.system();
+    private Directory directory;
     private Duration defaultTtl = Duration.ofMinutes(5);
     private int maxAttempts = 3;
     private Duration defaultThrottle = Duration.ofSeconds(1);
     private TaskSerializer<K> keySerializer;
     private TaskSerializer<T> taskSerializer;
 
-    private Builder() {}
+    private Builder(
+        Database database,
+        Directory directory,
+        TaskSerializer<K> keySerializer,
+        TaskSerializer<T> taskSerializer) {
+      this.database = database;
+      this.directory = directory;
+      this.keySerializer = keySerializer;
+      this.taskSerializer = taskSerializer;
+    }
+
+    public Builder<K, T> taskNameExtractor(Function<T, String> taskNameExtractor) {
+      this.taskNameExtractor = taskNameExtractor;
+      return this;
+    }
 
     /**
-     * Sets the key prefix for the task queue.
+     * Sets the directory for the task queue.
      */
-    public Builder<K, T> keyPrefix(Tuple keyPrefix) {
-      this.keyPrefix = keyPrefix;
+    public Builder<K, T> directory(Directory directory) {
+      this.directory = directory;
+      return this;
+    }
+
+    /**
+     * Sets the estimated number of workers that will be processing tasks from this queue.
+     *
+     * @param estimatedWorkerCount the estimated number of workers
+     * @return this builder
+     */
+    public Builder<K, T> estimatedWorkerCount(int estimatedWorkerCount) {
+      this.estimatedWorkerCount = estimatedWorkerCount;
+      return this;
+    }
+
+    /**
+     * Sets the instant source for time operations.
+     * Default: InstantSource.system()
+     */
+    public Builder<K, T> instantSource(InstantSource instantSource) {
+      this.instantSource = instantSource;
       return this;
     }
 

@@ -15,24 +15,21 @@ import "google/protobuf/duration.proto";
 message Task {
   // Unique identifier for the task (UUID stored as 16 bytes)
   bytes task_uuid = 1;
-  
+
   // When the task was created
   google.protobuf.Timestamp creation_time = 2;
-  
-  // Time-to-live for the task - controls how long a worker owns the task
-  google.protobuf.Duration ttl = 3;
-  
+
   // Task key tuple - supports at-most-one task per taskKey semantics
-  bytes task_key = 4;
-  
+  bytes task_key = 3;
+
   // Task version for schema evolution
-  int64 task_version = 5;
-  
+  int64 task_version = 4;
+
   // Current claim UUID (16 bytes) - indicates task ownership
-  bytes claim = 6;
-  
-  // Number of processing attempts
-  int64 attempts = 7;
+  optional bytes claim = 5;
+
+  // Number of processing attempts for this version of the task.
+  int64 attempts = 6;
 }
 
 // TaskKey represents the actual task data and execution parameters.
@@ -45,19 +42,19 @@ message Task {
 message TaskKey {
   // Unique identifier for the task (UUID stored as 16 bytes)
   bytes task_uuid = 1;
-  
+
   // When the task was created
   google.protobuf.Timestamp creation_time = 2;
-  
+
   // Time-to-live for the task
   google.protobuf.Duration ttl = 3;
-  
+
   // Expected execution time - tracks delay from submission time
   google.protobuf.Timestamp expected_execution_time = 4;
-  
+
   // Throttle duration - controls execution frequency per taskKey
   google.protobuf.Duration throttle = 5;
-  
+
   // Task payload - the actual task data
   bytes task = 6;
 }
@@ -75,7 +72,16 @@ message TaskKey {
 message TaskKeyMetadata {
   // Highest version seen for this task key
   int64 highest_version_seen = 1;
-  
-  // Current claim UUID (16 bytes) - tracks executing task version
-  bytes current_claim = 2;
+
+  message CurrentClaim {
+    // Current claim UUID (16 bytes) - indicates task ownership
+    bytes claim = 1;
+    // Version of the task that is currently claimed
+    int64 version = 2;
+    // Expiration time for the current claim
+    google.protobuf.Timestamp expiration_time = 3;
+  }
+
+  // Current claim for the task key
+  optional CurrentClaim current_claim = 2;
 }
