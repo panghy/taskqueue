@@ -1,6 +1,7 @@
 package io.github.panghy.taskqueue;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
@@ -213,6 +214,47 @@ class SimpleTaskQueueWrapperTest {
     assertThat(reclaimedTask.taskProto().getAttempts()).isEqualTo(2);
 
     taskQueue.completeTask(reclaimedTask).get();
+  }
+
+  @Test
+  void testExtendTtlSuccessfully() throws ExecutionException, InterruptedException {
+    taskQueue.enqueue("task-to-extend").get();
+
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+    assertThat(claim.task()).isEqualTo("task-to-extend");
+
+    // Extend the TTL
+    taskQueue.extendTtl(claim, Duration.ofMinutes(10)).get();
+
+    taskQueue.completeTask(claim).get();
+  }
+
+  @Test
+  void testExtendTtlUsingConvenienceMethod() throws ExecutionException, InterruptedException {
+    taskQueue.enqueue("task-with-convenience").get();
+
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+    assertThat(claim.task()).isEqualTo("task-with-convenience");
+
+    // Use convenience method
+    claim.extend(Duration.ofMinutes(20));
+
+    taskQueue.completeTask(claim).get();
+  }
+
+  @Test
+  void testExtendTtlWithInvalidDuration() throws ExecutionException, InterruptedException {
+    taskQueue.enqueue("test-invalid").get();
+
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+
+    assertThatThrownBy(
+            () -> taskQueue.extendTtl(claim, Duration.ofMinutes(-5)).get())
+        .isInstanceOf(ExecutionException.class)
+        .hasCauseInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("must be positive");
+
+    taskQueue.completeTask(claim).get();
   }
 
   @Test

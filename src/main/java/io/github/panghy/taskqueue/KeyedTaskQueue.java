@@ -268,6 +268,87 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   }
 
   @Override
+  public CompletableFuture<Void> extendTtl(Transaction tr, TaskClaim<K, T> taskClaim, Duration extension) {
+    if (extension.isNegative() || extension.isZero()) {
+      throw new IllegalArgumentException("Extension duration must be positive");
+    }
+    ByteString taskKeyBytes = taskClaim.taskProto().getTaskKey();
+    var taskMetadataF = getTaskMetadataAsync(tr, taskKeyBytes);
+    byte[] taskUuidB = taskClaim.taskProto().getTaskUuid().toByteArray();
+    UUID taskUuid = bytesToUuid(taskUuidB);
+    return taskMetadataF.thenCompose(taskMetadataProto -> {
+      if (taskMetadataProto == null) {
+        // likely a retry of a task that has already been completed.
+        LOGGER.warning("Task " + describeTask(taskUuid, taskClaim.task()) + " has no metadata. Skipping.");
+        return completedFuture(null);
+      }
+      // Check if the task has been claimed by another worker
+      if (taskMetadataProto.hasCurrentClaim()
+          && !taskMetadataProto
+              .getCurrentClaim()
+              .getClaim()
+              .equals(taskClaim.taskProto().getClaim())) {
+        // task has been claimed by another worker - throw exception
+        throw new TaskQueueException("Task " + describeTask(taskUuid, taskClaim.task())
+            + " has been claimed by another worker. Cannot extend TTL.");
+      }
+
+      // Calculate new expiration time
+      Instant newExpiration = config.getInstantSource().instant().plus(extension);
+
+      // If task is in claimed space, update its expiration
+      if (taskMetadataProto.hasCurrentClaim()) {
+        // Remove from old expiration slot
+        tr.clear(claimedTasks.pack(Tuple.from(
+            toJavaTimestamp(taskMetadataProto.getCurrentClaim().getExpirationTime())
+                .toEpochMilli(),
+            taskUuidB)));
+
+        // Add to new expiration slot
+        tr.set(
+            claimedTasks.pack(Tuple.from(newExpiration.toEpochMilli(), taskUuidB)),
+            taskClaim.taskProto().toByteArray());
+
+        // Update metadata with new expiration
+        var updatedMetadata = taskMetadataProto.toBuilder()
+            .setCurrentClaim(taskMetadataProto.getCurrentClaim().toBuilder()
+                .setExpirationTime(fromJavaTimestamp(newExpiration))
+                .build())
+            .build();
+        tr.set(
+            taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), METADATA_KEY)),
+            updatedMetadata.toByteArray());
+
+        LOGGER.info(
+            "Extended TTL for task: " + describeTask(taskUuid, taskClaim.task()) + " to " + newExpiration);
+      } else {
+        // Task has expired but not been reclaimed - we can still extend it
+        // Re-add to claimed space with new expiration
+        tr.set(
+            claimedTasks.pack(Tuple.from(newExpiration.toEpochMilli(), taskUuidB)),
+            taskClaim.taskProto().toByteArray());
+
+        // Update metadata with claim info and new expiration
+        var updatedMetadata = taskMetadataProto.toBuilder()
+            .setCurrentClaim(TaskKeyMetadata.CurrentClaim.newBuilder()
+                .setClaim(taskClaim.taskProto().getClaim())
+                .setVersion(taskClaim.taskProto().getTaskVersion())
+                .setExpirationTime(fromJavaTimestamp(newExpiration))
+                .build())
+            .build();
+        tr.set(
+            taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), METADATA_KEY)),
+            updatedMetadata.toByteArray());
+
+        LOGGER.info("Re-extended expired task: " + describeTask(taskUuid, taskClaim.task()) + " to "
+            + newExpiration);
+      }
+
+      return completedFuture(null);
+    });
+  }
+
+  @Override
   public CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim) {
     ByteString taskKeyBytes = taskClaim.taskProto().getTaskKey();
     var taskMetadataF = getTaskMetadataAsync(tr, taskKeyBytes);

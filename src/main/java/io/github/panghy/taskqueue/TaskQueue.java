@@ -220,4 +220,29 @@ public interface TaskQueue<K, T> {
    * @return A future that completes when the task has been failed.
    */
   CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim);
+
+  /**
+   * Extends the TTL for a claimed task. This allows a worker to request more time to process a task.
+   * If the task has expired but not been claimed by another worker, the TTL can still be extended.
+   * If the task has been claimed by another worker (claim has changed), an exception will be thrown.
+   *
+   * @param taskClaim The task claim to extend.
+   * @param extension The duration from now to set as the new expiration time. Must be positive.
+   * @return A future that completes when the TTL has been extended.
+   */
+  default CompletableFuture<Void> extendTtl(TaskClaim<K, T> taskClaim, Duration extension) {
+    return runAsync(tr -> extendTtl(tr, taskClaim, extension));
+  }
+
+  /**
+   * Extends the TTL for a claimed task. This allows a worker to request more time to process a task.
+   * If the task has expired but not been claimed by another worker, the TTL can still be extended.
+   * If the task has been claimed by another worker (claim has changed), an exception will be thrown.
+   *
+   * @param tr        The transaction to use for the operation.
+   * @param taskClaim The task claim to extend.
+   * @param extension The duration from now to set as the new expiration time. Must be positive.
+   * @return A future that completes when the TTL has been extended.
+   */
+  CompletableFuture<Void> extendTtl(Transaction tr, TaskClaim<K, T> taskClaim, Duration extension);
 }

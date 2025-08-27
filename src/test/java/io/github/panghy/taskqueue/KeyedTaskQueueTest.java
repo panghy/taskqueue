@@ -1,6 +1,7 @@
 package io.github.panghy.taskqueue;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
@@ -889,6 +890,257 @@ public class KeyedTaskQueueTest {
 
     claim.complete();
     assertQueueIsEmpty(queue);
+  }
+
+  @Test
+  void testExtendTtlSuccessfully() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    queue.enqueue("extendable", "task").get(5, TimeUnit.SECONDS);
+
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim.task()).isEqualTo("task");
+
+    // Extend the TTL by 10 minutes
+    queue.extendTtl(claim, Duration.ofMinutes(10)).get(5, TimeUnit.SECONDS);
+
+    // Task should still be claimed by us
+    claim.complete();
+  }
+
+  @Test
+  void testExtendTtlForExpiredTaskStillHeldByUs() throws ExecutionException, InterruptedException, TimeoutException {
+    var testTime = new AtomicLong(1000);
+    var testConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(testTime.get()))
+        .defaultTtl(Duration.ofSeconds(5))
+        .maxAttempts(3)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(testConfig, db).get();
+
+    queue.enqueue("expired-task", "data").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Move time forward past expiration
+    testTime.set(10000);
+
+    // Should be able to extend even though expired
+    queue.extendTtl(claim, Duration.ofMinutes(5)).get(5, TimeUnit.SECONDS);
+    claim.complete();
+  }
+
+  @Test
+  void testExtendTtlFailsWhenClaimedByAnother() throws ExecutionException, InterruptedException, TimeoutException {
+    var testTime = new AtomicLong(1000);
+    var testConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(testTime.get()))
+        .defaultTtl(Duration.ofSeconds(5))
+        .maxAttempts(3)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(testConfig, db).get();
+
+    queue.enqueue("contested-task", "data").get(5, TimeUnit.SECONDS);
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Move time forward past expiration
+    testTime.set(10000);
+
+    // Another worker claims the expired task
+    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim2.task()).isEqualTo("data");
+
+    // First worker tries to extend - should throw exception
+    assertThatThrownBy(() -> queue.extendTtl(claim1, Duration.ofMinutes(5)).get(5, TimeUnit.SECONDS))
+        .isInstanceOf(ExecutionException.class)
+        .hasCauseInstanceOf(TaskQueueException.class)
+        .hasMessageContaining("claimed by another worker");
+
+    claim2.complete();
+  }
+
+  @Test
+  void testExtendTtlWithNegativeDurationFails() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    queue.enqueue("test-task", "data").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    assertThatThrownBy(() -> queue.extendTtl(claim, Duration.ofMinutes(-5)).get(5, TimeUnit.SECONDS))
+        .isInstanceOf(ExecutionException.class)
+        .hasCauseInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("must be positive");
+
+    claim.complete();
+  }
+
+  @Test
+  void testExtendTtlWithZeroDurationFails() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    queue.enqueue("test-task", "data").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    assertThatThrownBy(() -> queue.extendTtl(claim, Duration.ZERO).get(5, TimeUnit.SECONDS))
+        .isInstanceOf(ExecutionException.class)
+        .hasCauseInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("must be positive");
+
+    claim.complete();
+  }
+
+  @Test
+  void testExtendTtlForCompletedTaskDoesNothing() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    queue.enqueue("completed-task", "data").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Complete the task
+    claim.complete();
+
+    // Try to extend TTL after completion - should do nothing (no error)
+    queue.extendTtl(claim, Duration.ofMinutes(10)).get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testExtendUsingConvenienceMethod() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    queue.enqueue("convenience-test", "data").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Use convenience method on TaskClaim
+    claim.extend(Duration.ofMinutes(15));
+
+    claim.complete();
+  }
+
+  @Test
+  void testTaskClaimHelperMethods() throws ExecutionException, InterruptedException, TimeoutException {
+    var testTime = new AtomicLong(1000);
+    var testConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(testTime.get()))
+        .defaultTtl(Duration.ofMinutes(5))
+        .maxAttempts(3)
+        .defaultThrottle(Duration.ofSeconds(10))
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(testConfig, db).get();
+
+    queue.enqueue("test-key", "test-data").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Test getters
+    assertThat(claim.getAttempts()).isEqualTo(1);
+    assertThat(claim.getTaskVersion()).isEqualTo(1);
+    assertThat(claim.task()).isEqualTo("test-data");
+    assertThat(claim.taskKey()).isEqualTo("test-key");
+
+    // Test UUID getters
+    assertThat(claim.getTaskUuid()).isNotNull();
+    assertThat(claim.getClaimUuid()).isNotNull();
+
+    // Test time-related methods
+    assertThat(claim.getCreationTime()).isEqualTo(Instant.ofEpochMilli(1000));
+    assertThat(claim.getExpectedExecutionTime()).isEqualTo(Instant.ofEpochMilli(1000));
+    assertThat(claim.getTtl()).isEqualTo(Duration.ofMinutes(5));
+    assertThat(claim.getThrottle()).isEqualTo(Duration.ofSeconds(10));
+
+    // Test expiration methods
+    assertThat(claim.getExpirationTime()).isEqualTo(Instant.ofEpochMilli(1000 + 5 * 60 * 1000));
+    assertThat(claim.isExpired()).isFalse();
+    assertThat(claim.getTimeUntilExpiration()).isEqualTo(Duration.ofMinutes(5));
+
+    // Move time forward but not past expiration
+    testTime.set(1000 + 3 * 60 * 1000); // 3 minutes later
+    assertThat(claim.isExpired()).isFalse();
+    assertThat(claim.getTimeUntilExpiration()).isEqualTo(Duration.ofMinutes(2));
+
+    // Move time forward past expiration
+    testTime.set(1000 + 6 * 60 * 1000); // 6 minutes later
+    assertThat(claim.isExpired()).isTrue();
+    assertThat(claim.getTimeUntilExpiration()).isEqualTo(Duration.ZERO);
+
+    claim.complete();
+  }
+
+  @Test
+  void testTaskClaimTransactionMethods() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    queue.enqueue("tx-test", "data").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Test transaction-based complete
+    db.run(tr -> {
+      claim.complete(tr);
+      return null;
+    });
+
+    // Enqueue another task and test transaction-based fail
+    queue.enqueue("tx-test-2", "data2").get(5, TimeUnit.SECONDS);
+    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    db.run(tr -> {
+      claim2.fail(tr);
+      return null;
+    });
+
+    // Claim the failed task and test transaction-based extend
+    var claim3 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim3.task()).isEqualTo("data2");
+    assertThat(claim3.getAttempts()).isEqualTo(2);
+
+    db.run(tr -> {
+      claim3.extend(tr, Duration.ofMinutes(10));
+      return null;
+    });
+
+    claim3.complete();
+  }
+
+  @Test
+  void testTaskClaimVersionChecks() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue first version
+    queue.enqueue("versioned", "v1").get(5, TimeUnit.SECONDS);
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Check version at claim time
+    assertThat(claim1.getTaskVersion()).isEqualTo(1);
+    assertThat(claim1.task()).isEqualTo("v1");
+
+    // Enqueue newer version
+    queue.enqueue("versioned", "v2").get(5, TimeUnit.SECONDS);
+
+    // The newer version will be picked up after this task completes
+    claim1.complete();
+
+    // Now claim the newer version
+    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim2.task()).isEqualTo("v2");
+    assertThat(claim2.getTaskVersion()).isEqualTo(2);
+    claim2.complete();
+  }
+
+  @Test
+  void testTaskClaimMaxAttemptsCheck() throws ExecutionException, InterruptedException, TimeoutException {
+    var testTime = new AtomicLong(1000);
+    var testConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(testTime.get()))
+        .defaultTtl(Duration.ofSeconds(5))
+        .maxAttempts(2)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(testConfig, db).get();
+
+    queue.enqueue("retry-task", "data").get(5, TimeUnit.SECONDS);
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim1.getAttempts()).isEqualTo(1);
+
+    // Move time forward and fail the task
+    testTime.set(10000);
+    claim1.fail();
+
+    // Claim again - should be attempt 2
+    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim2.getAttempts()).isEqualTo(2);
+
+    claim2.complete();
   }
 
   @Test
