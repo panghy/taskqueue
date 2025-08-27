@@ -314,11 +314,11 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           tr.set(
               unclaimedTasks.pack(Tuple.from(visibleTime.toEpochMilli(), taskUuidB)),
               updatedTaskProto.toByteArray());
-          var updatedTaskMetdataProto =
+          var updatedTaskMetadataProto =
               taskMetadataProto.toBuilder().clearCurrentClaim().build();
           tr.set(
               taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), METADATA_KEY)),
-              updatedTaskMetdataProto.toByteArray());
+              updatedTaskMetadataProto.toByteArray());
           return completedFuture(null);
         }
       } else {
