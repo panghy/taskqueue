@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 
@@ -159,7 +160,6 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
       return null;
     });
     return taskF.thenApply(v -> {
-      incrementWatchKey(tr);
       LOGGER.info("Enqueued task: " + describeTask(taskUuid, task));
       return setMetadataF.join();
     });
@@ -187,10 +187,41 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                   });
                 });
               });
+              // find the next expiration time.
+              var nextExpirationOF = db.runAsync(tr -> {
+                // either unclaimed becomes visible or claimed expires.
+                var unclaimedF = findNextExpiration(tr, unclaimedTasks);
+                var claimedF = findNextExpiration(tr, claimedTasks);
+                return allOf(unclaimedF, claimedF).thenApply(v -> {
+                  // take the earlier one if available.
+                  Optional<Instant> earliestUnclaimedO = unclaimedF.join();
+                  Optional<Instant> earliestClaimedO = claimedF.join();
+                  if (earliestUnclaimedO.isPresent() && earliestClaimedO.isPresent()) {
+                    return earliestUnclaimedO.get().compareTo(earliestClaimedO.get()) < 0
+                        ? earliestUnclaimedO
+                        : earliestClaimedO;
+                  } else if (earliestUnclaimedO.isPresent()) {
+                    return earliestUnclaimedO;
+                  } else return earliestClaimedO;
+                });
+              });
               // txn has committed, watch is now active.
               return watchFF.thenCompose(watchF -> {
+                // watchF is null if a task was found.
                 if (watchF != null) {
-                  return watchF.thenApply($ -> true);
+                  return nextExpirationOF.thenCompose(nextExpirationO -> {
+                    if (nextExpirationO.isPresent()) {
+                      long sleepTime = nextExpirationO.get().toEpochMilli() -
+                                       config.getInstantSource().instant().toEpochMilli();
+                      if (sleepTime > 0) {
+                        return watchF.orTimeout(sleepTime, TimeUnit.MILLISECONDS)
+                            .exceptionally($ -> null)
+                            .thenApply($ -> true);
+                      }
+                      return completedFuture(true);
+                    }
+                    return watchF.thenApply($ -> true);
+                  });
                 }
                 return completedFuture(false);
               });
@@ -247,7 +278,11 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           }
           Task newTaskProto = createNewTaskProto(
               taskKeyProto.getTaskUuid(), taskKeyBytes, taskMetadataProto.getHighestVersionSeen());
-          storeUnclaimedTask(tr, expectedExecutionTime, taskKeyProto.getTaskUuid().toByteArray(), newTaskProto);
+          storeUnclaimedTask(
+              tr,
+              expectedExecutionTime,
+              taskKeyProto.getTaskUuid().toByteArray(),
+              newTaskProto);
           TaskKeyMetadata updatedTaskKeyMetadataProto =
               taskMetadataProto.toBuilder().clearCurrentClaim().build();
           storeTaskMetadata(tr, taskKeyB, updatedTaskKeyMetadataProto);
@@ -310,9 +345,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             "Extended TTL for task: " + describeTask(taskUuid, taskClaim.task()) + " to " + newExpiration);
       } else {
         // This should never happen - a worker with an active claim found metadata with no current claim
-        throw new TaskQueueException(
-            "Task " + describeTask(taskUuid, taskClaim.task()) +
-            " has inconsistent state: worker has claim but metadata shows no current claim");
+        throw new TaskQueueException("Task " + describeTask(taskUuid, taskClaim.task())
+                                     + " has inconsistent state: worker has claim but metadata shows no current claim");
       }
 
       return completedFuture(null);
@@ -380,7 +414,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           Instant visibleTime = toJavaTimestamp(latestTaskKey.getExpectedExecutionTime());
           var updatedTaskProto = createNewTaskProto(
               latestTaskKey.getTaskUuid(), taskKeyBytes, taskMetadataProto.getHighestVersionSeen());
-          storeUnclaimedTask(tr, visibleTime, latestTaskKey.getTaskUuid().toByteArray(), updatedTaskProto);
+          storeUnclaimedTask(
+              tr, visibleTime, latestTaskKey.getTaskUuid().toByteArray(), updatedTaskProto);
           var updatedTaskMetadataProto =
               taskMetadataProto.toBuilder().clearCurrentClaim().build();
           storeTaskMetadata(tr, taskKeyB, updatedTaskMetadataProto);
@@ -475,7 +510,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   private CompletableFuture<KeyValue> snapshotPickTaskFromRange(Transaction tr, DirectorySubspace subspace) {
     return tr.snapshot()
-        .getRange(Range.startsWith(subspace.pack()), config.getEstimatedWorkerCount())
+        .getRange(subspace.pack(0),
+            subspace.pack(config.getInstantSource().instant().toEpochMilli() + 1),
+            config.getEstimatedWorkerCount())
         .asList()
         .thenApply(v -> {
           if (v == null || v.isEmpty()) {
@@ -483,6 +520,18 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           }
           // randomly choose one.
           return v.get(random.nextInt(v.size()));
+        });
+  }
+
+  private CompletableFuture<Optional<Instant>> findNextExpiration(Transaction tr, DirectorySubspace subspace) {
+    return tr.snapshot()
+        .getRange(subspace.range(), 1)
+        .asList()
+        .thenApply(v -> {
+          if (v == null || v.isEmpty()) {
+            return Optional.empty();
+          }
+          return Optional.of(Instant.ofEpochMilli(Tuple.fromBytes(v.get(0).getKey()).getLong(0)));
         });
   }
 
@@ -612,13 +661,12 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   /**
    * Stores task metadata in the database.
    *
-   * @param tr           the transaction to use
+   * @param tr       the transaction to use
    * @param taskKeyB the task key bytes
-   * @param metadata     the metadata proto to store
+   * @param metadata the metadata proto to store
    */
   private void storeTaskMetadata(Transaction tr, byte[] taskKeyB, TaskKeyMetadata metadata) {
-    tr.set(
-        taskKeys.pack(Tuple.from(taskKeyB, METADATA_KEY)), metadata.toByteArray());
+    tr.set(taskKeys.pack(Tuple.from(taskKeyB, METADATA_KEY)), metadata.toByteArray());
   }
 
   /**
@@ -630,9 +678,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
    * @param taskProto   the task proto to store
    */
   private void storeUnclaimedTask(Transaction tr, Instant visibleTime, byte[] taskUuidB, Task taskProto) {
-    tr.set(
-        unclaimedTasks.pack(Tuple.from(visibleTime.toEpochMilli(), taskUuidB)),
-        taskProto.toByteArray());
+    tr.set(unclaimedTasks.pack(Tuple.from(visibleTime.toEpochMilli(), taskUuidB)), taskProto.toByteArray());
+    // Always increment watch key to notify waiting workers
+    incrementWatchKey(tr);
   }
 
   /**
@@ -644,9 +692,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
    * @param taskProto      the task proto to store
    */
   private void storeClaimedTask(Transaction tr, Instant expirationTime, byte[] taskUuidB, Task taskProto) {
-    tr.set(
-        claimedTasks.pack(Tuple.from(expirationTime.toEpochMilli(), taskUuidB)),
-        taskProto.toByteArray());
+    tr.set(claimedTasks.pack(Tuple.from(expirationTime.toEpochMilli(), taskUuidB)), taskProto.toByteArray());
   }
 
   /**
@@ -658,9 +704,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
    * @param taskKey  the task key proto to store
    */
   private void storeTaskKey(Transaction tr, byte[] taskKeyB, long version, TaskKey taskKey) {
-    tr.set(
-        taskKeys.pack(Tuple.from(taskKeyB, version)),
-        taskKey.toByteArray());
+    tr.set(taskKeys.pack(Tuple.from(taskKeyB, version)), taskKey.toByteArray());
   }
 
   private TaskKey createNewTaskKeyProto(
