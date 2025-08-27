@@ -470,7 +470,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
       var highestTaskKeyF = taskKeyMetadataF.thenCompose(taskKeyMetadataProto ->
           getTaskKeyAsync(tr, taskKeyBytes, taskKeyMetadataProto.getHighestVersionSeen()));
       return allOf(highestTaskKeyF, taskKeyMetadataF).thenApply(v -> {
-        TaskKey lastestTaskKey = highestTaskKeyF.join();
+        TaskKey latestTaskKey = highestTaskKeyF.join();
         TaskKeyMetadata taskKeyMetadataProto = taskKeyMetadataF.join();
         if (taskKeyMetadataProto.hasCurrentClaim()) {
           if (!taskKeyMetadataProto.getCurrentClaim().getClaim().equals(taskProto.getClaim())) {
