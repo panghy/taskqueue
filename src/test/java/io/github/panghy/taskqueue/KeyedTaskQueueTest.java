@@ -1041,17 +1041,18 @@ public class KeyedTaskQueueTest {
     assertThat(claim.getThrottle()).isEqualTo(Duration.ofSeconds(10));
 
     // Test expiration methods
-    assertThat(claim.getExpirationTime()).isEqualTo(Instant.ofEpochMilli(1000 + 5 * 60 * 1000));
+    assertThat(claim.getExpirationTime())
+        .isEqualTo(Instant.ofEpochMilli(1000 + Duration.ofMinutes(5).toMillis()));
     assertThat(claim.isExpired()).isFalse();
     assertThat(claim.getTimeUntilExpiration()).isEqualTo(Duration.ofMinutes(5));
 
     // Move time forward but not past expiration
-    testTime.set(1000 + 3 * 60 * 1000); // 3 minutes later
+    testTime.set(1000 + Duration.ofMinutes(3).toMillis()); // 3 minutes later
     assertThat(claim.isExpired()).isFalse();
     assertThat(claim.getTimeUntilExpiration()).isEqualTo(Duration.ofMinutes(2));
 
     // Move time forward past expiration
-    testTime.set(1000 + 6 * 60 * 1000); // 6 minutes later
+    testTime.set(1000 + Duration.ofMinutes(6).toMillis()); // 6 minutes later
     assertThat(claim.isExpired()).isTrue();
     assertThat(claim.getTimeUntilExpiration()).isEqualTo(Duration.ZERO);
 

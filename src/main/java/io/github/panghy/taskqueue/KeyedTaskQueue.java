@@ -322,7 +322,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         LOGGER.info(
             "Extended TTL for task: " + describeTask(taskUuid, taskClaim.task()) + " to " + newExpiration);
       } else {
-        // Task has expired but not been reclaimed - we can still extend it
+        // Task has no current claim (could be expired, released, or never claimed) - we can still extend it
         // Re-add to claimed space with new expiration
         tr.set(
             claimedTasks.pack(Tuple.from(newExpiration.toEpochMilli(), taskUuidB)),
