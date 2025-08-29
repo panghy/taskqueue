@@ -96,6 +96,8 @@ spotless {
   }
 }
 
+compileJava.dependsOn 'spotlessApply'
+
 // JaCoCo configuration
 jacoco {
   toolVersion = "0.8.13"
