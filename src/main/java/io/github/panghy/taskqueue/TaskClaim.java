@@ -7,6 +7,7 @@ import io.github.panghy.taskqueue.proto.TaskKeyMetadata;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import lombok.Builder;
 
 /**
@@ -27,35 +28,41 @@ public record TaskClaim<K, T>(
   /**
    * Completes the task, removing it from the queue.
    * Uses a standalone transaction.
+   *
+   * @return A future that completes when the task has been completed.
    */
-  public void complete() {
-    taskQueue.completeTask(this);
+  public CompletableFuture<Void> complete() {
+    return taskQueue.completeTask(this);
   }
 
   /**
    * Completes the task within an existing transaction.
    *
    * @param tr the transaction to use
+   * @return A future that completes when the task has been completed.
    */
-  public void complete(Transaction tr) {
-    taskQueue.completeTask(tr, this);
+  public CompletableFuture<Void> complete(Transaction tr) {
+    return taskQueue.completeTask(tr, this);
   }
 
   /**
    * Fails the task, causing it to be retried.
    * Uses a standalone transaction.
+   *
+   * @return A future that completes when the task has been failed.
    */
-  public void fail() {
-    taskQueue.failTask(this);
+  public CompletableFuture<Void> fail() {
+    return taskQueue.failTask(this);
   }
 
   /**
    * Fails the task within an existing transaction.
    *
    * @param tr the transaction to use
+   * @return A future that completes when the task has been failed.
    */
-  public void fail(Transaction tr) {
-    taskQueue.failTask(tr, this);
+  public CompletableFuture<Void> fail(Transaction tr) {
+    return taskQueue.failTask(tr, this);
   }
 
   /**
@@ -63,9 +70,10 @@ public record TaskClaim<K, T>(
    * Uses a standalone transaction.
    *
    * @param extension the duration from now to set as the new expiration time (must be positive)
+   * @return A future that completes when the TTL has been extended.
    */
-  public void extend(Duration extension) {
-    taskQueue.extendTtl(this, extension);
+  public CompletableFuture<Void> extend(Duration extension) {
+    return taskQueue.extendTtl(this, extension);
   }
 
   /**
@@ -73,9 +81,10 @@ public record TaskClaim<K, T>(
    *
    * @param tr        the transaction to use
    * @param extension the duration from now to set as the new expiration time (must be positive)
+   * @return A future that completes when the TTL has been extended.
    */
-  public void extend(Transaction tr, Duration extension) {
-    taskQueue.extendTtl(tr, this, extension);
+  public CompletableFuture<Void> extend(Transaction tr, Duration extension) {
+    return taskQueue.extendTtl(tr, this, extension);
   }
 
   /**

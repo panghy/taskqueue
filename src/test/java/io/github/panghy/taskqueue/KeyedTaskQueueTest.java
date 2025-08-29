@@ -191,7 +191,7 @@ public class KeyedTaskQueueTest {
     var taskClaim2F = assertQueueIsEmpty(queue);
 
     // complete task 1
-    taskClaim.complete();
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
     var taskClaim2 = taskClaim2F.get(5, TimeUnit.SECONDS);
     assertThat(taskClaim2).isNotNull();
     assertThat(taskClaim2.taskKey()).isEqualTo("test");
@@ -252,21 +252,21 @@ public class KeyedTaskQueueTest {
     var taskClaimF = queue.awaitAndClaimTask();
 
     // Wait a bit to let the await task start waiting
-    Thread.sleep(100);
     assertThat(taskClaimF.isDone()).isFalse();
 
-    // Advance time by 2 more seconds - now ready  
+    // Advance time by 2 more seconds - now ready
     simulatedTime.set(6000);
-    
+
     // Trigger a watch update by enqueueing a dummy task with delay so it won't be picked up
-    db.runAsync(tr -> queue.enqueue(tr, "dummy", "dummy", Duration.ofHours(1), config.getDefaultTtl())).get(5, TimeUnit.SECONDS);
-    
+    db.runAsync(tr -> queue.enqueue(tr, "dummy", "dummy", Duration.ofHours(1), config.getDefaultTtl()))
+        .get(5, TimeUnit.SECONDS);
+
     var taskClaim = taskClaimF.get(5, TimeUnit.SECONDS);
     assertThat(taskClaim).isNotNull();
     assertThat(taskClaim.taskKey()).isEqualTo("delayed");
     assertThat(taskClaim.task()).isEqualTo("delayed-task");
 
-    taskClaim.complete();
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -353,7 +353,7 @@ public class KeyedTaskQueueTest {
 
     // Complete first version - should trigger second version
     var taskClaim2F = assertQueueIsEmpty(queue);
-    taskClaim1.complete();
+    taskClaim1.complete().get(5, TimeUnit.SECONDS);
 
     // Second version should be available
     var taskClaim2 = taskClaim2F.get(5, TimeUnit.SECONDS);
@@ -378,17 +378,17 @@ public class KeyedTaskQueueTest {
 
     // Task should not be available immediately due to delay
     var taskClaimF = queue.awaitAndClaimTask();
-    
+
     // Wait a bit to let the await task start waiting
-    Thread.sleep(100);
     assertThat(taskClaimF.isDone()).isFalse();
 
     // Advance time to make task available
     simulatedTime.set(4000);
-    
+
     // Trigger a watch update by enqueueing a dummy task with delay so it won't be picked up
-    db.runAsync(tr -> queue.enqueue(tr, "dummy", "dummy", Duration.ofHours(1), config.getDefaultTtl())).get(5, TimeUnit.SECONDS);
-    
+    db.runAsync(tr -> queue.enqueue(tr, "dummy", "dummy", Duration.ofHours(1), config.getDefaultTtl()))
+        .get(5, TimeUnit.SECONDS);
+
     var taskClaim = taskClaimF.get(5, TimeUnit.SECONDS);
     assertThat(taskClaim).isNotNull();
 
@@ -400,7 +400,7 @@ public class KeyedTaskQueueTest {
     assertThat(noTaskF.isDone()).isFalse();
 
     // Complete the task
-    taskClaim.complete();
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -411,7 +411,7 @@ public class KeyedTaskQueueTest {
     // Test TaskClaim.complete() convenience method
     queue.enqueue("convenience1", "task1").get(5, TimeUnit.SECONDS);
     var taskClaim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
-    taskClaim1.complete(); // Using convenience method instead of queue.completeTask()
+    taskClaim1.complete().get(5, TimeUnit.SECONDS); // Using convenience method instead of queue.completeTask()
 
     // Test TaskClaim.fail() convenience method
     queue.enqueue("convenience2", "task2").get(5, TimeUnit.SECONDS);
@@ -445,7 +445,7 @@ public class KeyedTaskQueueTest {
 
     // Complete first task, second should be picked up
     var nextTaskF = assertQueueIsEmpty(queue);
-    taskClaim.complete();
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
 
     var nextTask = nextTaskF.get(5, TimeUnit.SECONDS);
     assertThat(nextTask.task()).isEqualTo("task3");
@@ -491,7 +491,7 @@ public class KeyedTaskQueueTest {
     queue.enqueue("versioned", "v2").get(5, TimeUnit.SECONDS);
 
     // Fail the first version - should schedule the latest version (v2)
-    claim1.fail();
+    claim1.fail().get(5, TimeUnit.SECONDS);
 
     var nextTask = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
     assertThat(nextTask.task()).isEqualTo("v2");
@@ -556,11 +556,11 @@ public class KeyedTaskQueueTest {
 
     // Complete first version - second version should be immediately available
     // (throttling may be applied differently than expected)
-    claim1.complete();
+    claim1.complete().get(5, TimeUnit.SECONDS);
 
     var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
     assertThat(claim2.task()).isEqualTo("v2");
-    claim2.complete();
+    claim2.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -573,8 +573,8 @@ public class KeyedTaskQueueTest {
     var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
 
     // Complete the task twice - should be idempotent
-    taskClaim.complete();
-    taskClaim.complete(); // Second completion should not cause issues
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
+    taskClaim.complete().get(5, TimeUnit.SECONDS); // Second completion should not cause issues
 
     assertQueueIsEmpty(queue);
   }
@@ -588,8 +588,8 @@ public class KeyedTaskQueueTest {
     var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
 
     // Fail the task twice - should be idempotent
-    taskClaim.fail();
-    taskClaim.fail(); // Second failure should not cause issues
+    taskClaim.fail().get(5, TimeUnit.SECONDS);
+    taskClaim.fail().get(5, TimeUnit.SECONDS); // Second failure should not cause issues
 
     // Task should still be retried once
     var retriedTask = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
@@ -613,7 +613,7 @@ public class KeyedTaskQueueTest {
     assertThat(taskClaim.taskKey()).isEqualTo("immediate");
     assertThat(taskClaim.task()).isEqualTo("task");
 
-    taskClaim.complete();
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -654,7 +654,7 @@ public class KeyedTaskQueueTest {
     assertThat(claim.task()).isEqualTo("v3"); // Latest task data
     assertThat(claim.taskProto().getTaskVersion()).isEqualTo(3); // Latest version
 
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -687,10 +687,10 @@ public class KeyedTaskQueueTest {
         .isEqualTo(claim1.taskProto().getTaskUuid());
 
     // Original claim should still be able to complete (idempotent)
-    claim1.complete();
+    claim1.complete().get(5, TimeUnit.SECONDS);
 
     // But the reclaimed task should also be completable
-    claim2.complete();
+    claim2.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -707,21 +707,21 @@ public class KeyedTaskQueueTest {
 
     // Task should not be available immediately
     var taskClaimF = queue.awaitAndClaimTask();
-    
+
     // Wait a bit to let the await task start waiting
-    Thread.sleep(100);
     assertThat(taskClaimF.isDone()).isFalse();
 
     // Advance time to make task available
     simulatedTime.set(4000);
-    
+
     // Trigger a watch update by enqueueing a dummy task with delay so it won't be picked up
-    db.runAsync(tr -> queue.enqueue(tr, "dummy", "dummy", Duration.ofHours(1), config.getDefaultTtl())).get(5, TimeUnit.SECONDS);
-    
+    db.runAsync(tr -> queue.enqueue(tr, "dummy", "dummy", Duration.ofHours(1), config.getDefaultTtl()))
+        .get(5, TimeUnit.SECONDS);
+
     var taskClaim = taskClaimF.get(5, TimeUnit.SECONDS);
     assertThat(taskClaim.taskKey()).isEqualTo("delayed");
 
-    taskClaim.complete();
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -746,8 +746,8 @@ public class KeyedTaskQueueTest {
     assertThat(claim1.taskKey()).isNotEqualTo(claim2.taskKey());
 
     // Complete both tasks
-    claim1.complete();
-    claim2.complete();
+    claim1.complete().get(5, TimeUnit.SECONDS);
+    claim2.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -765,7 +765,7 @@ public class KeyedTaskQueueTest {
     queue.enqueue("versioned", "v3").get(5, TimeUnit.SECONDS);
 
     // Fail the first version - should reschedule latest version (v3)
-    claim1.fail();
+    claim1.fail().get(5, TimeUnit.SECONDS);
 
     // Should get the latest version
     var nextClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
@@ -818,11 +818,11 @@ public class KeyedTaskQueueTest {
     var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
 
     // Complete the task
-    taskClaim.complete();
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
 
     // Try to complete again after task is already completed
     // This tests the edge case where metadata has no current claim
-    taskClaim.complete();
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
 
     assertQueueIsEmpty(queue);
   }
@@ -836,11 +836,11 @@ public class KeyedTaskQueueTest {
     var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
 
     // Complete the task
-    taskClaim.complete();
+    taskClaim.complete().get(5, TimeUnit.SECONDS);
 
     // Try to fail after task is already completed
     // This tests the edge case where metadata has no current claim
-    taskClaim.fail();
+    taskClaim.fail().get(5, TimeUnit.SECONDS);
 
     assertQueueIsEmpty(queue);
   }
@@ -860,7 +860,7 @@ public class KeyedTaskQueueTest {
     assertThat(claim.taskKey()).isEqualTo("new");
     assertThat(claim.task()).isEqualTo("task");
 
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -908,7 +908,7 @@ public class KeyedTaskQueueTest {
     var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
     assertThat(claim).isNotNull();
 
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
     assertQueueIsEmpty(queue);
   }
 
@@ -924,7 +924,7 @@ public class KeyedTaskQueueTest {
     queue.extendTtl(claim, Duration.ofMinutes(10)).get(5, TimeUnit.SECONDS);
 
     // Task should still be claimed by us
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -945,7 +945,7 @@ public class KeyedTaskQueueTest {
 
     // Should be able to extend the TTL
     queue.extendTtl(claim, Duration.ofMinutes(5)).get(5, TimeUnit.SECONDS);
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -974,7 +974,7 @@ public class KeyedTaskQueueTest {
         .hasCauseInstanceOf(TaskQueueException.class)
         .hasMessageContaining("claimed by another worker");
 
-    claim2.complete();
+    claim2.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -988,7 +988,7 @@ public class KeyedTaskQueueTest {
         .hasCauseInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("must be positive");
 
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -1002,7 +1002,7 @@ public class KeyedTaskQueueTest {
         .hasCauseInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("must be positive");
 
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -1012,7 +1012,7 @@ public class KeyedTaskQueueTest {
     var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
 
     // Complete the task
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
 
     // Try to extend TTL after completion - should do nothing (no error)
     queue.extendTtl(claim, Duration.ofMinutes(10)).get(5, TimeUnit.SECONDS);
@@ -1025,9 +1025,9 @@ public class KeyedTaskQueueTest {
     var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
 
     // Use convenience method on TaskClaim
-    claim.extend(Duration.ofMinutes(15));
+    claim.extend(Duration.ofMinutes(15)).get(5, TimeUnit.SECONDS);
 
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -1076,7 +1076,7 @@ public class KeyedTaskQueueTest {
     assertThat(claim.isExpired()).isTrue();
     assertThat(claim.getTimeUntilExpiration()).isEqualTo(Duration.ZERO);
 
-    claim.complete();
+    claim.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -1087,40 +1087,29 @@ public class KeyedTaskQueueTest {
     var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
 
     // Test transaction-based complete
-    db.run(tr -> {
-      claim.complete(tr);
-      return null;
-    });
+    db.runAsync(claim::complete).get(5, TimeUnit.SECONDS);
 
     // Enqueue another task and test transaction-based fail
     queue.enqueue("tx-test-2", "data2").get(5, TimeUnit.SECONDS);
     var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
 
-    db.run(tr -> {
-      claim2.fail(tr);
-      return null;
-    });
+    db.runAsync(claim2::fail).get(5, TimeUnit.SECONDS);
 
     // Start waiting for the failed task before it's available
     var claim3F = queue.awaitAndClaimTask(db);
-    
-    // Give it a moment to start waiting
-    Thread.sleep(100);
-    
+
     // Trigger a watch update to ensure the failed task is noticed
-    db.runAsync(tr -> queue.enqueue(tr, "dummy-trigger", "dummy", Duration.ofHours(1), config.getDefaultTtl())).get(5, TimeUnit.SECONDS);
-    
+    db.runAsync(tr -> queue.enqueue(tr, "dummy-trigger", "dummy", Duration.ofHours(1), config.getDefaultTtl()))
+        .get(5, TimeUnit.SECONDS);
+
     // Now get the claim
     var claim3 = claim3F.get(5, TimeUnit.SECONDS);
     assertThat(claim3.task()).isEqualTo("data2");
     assertThat(claim3.getAttempts()).isEqualTo(2);
 
-    db.run(tr -> {
-      claim3.extend(tr, Duration.ofMinutes(10));
-      return null;
-    });
+    db.runAsync(tr -> claim3.extend(tr, Duration.ofMinutes(10))).get(5, TimeUnit.SECONDS);
 
-    claim3.complete();
+    claim3.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -1139,13 +1128,13 @@ public class KeyedTaskQueueTest {
     queue.enqueue("versioned", "v2").get(5, TimeUnit.SECONDS);
 
     // The newer version will be picked up after this task completes
-    claim1.complete();
+    claim1.complete().get(5, TimeUnit.SECONDS);
 
     // Now claim the newer version
     var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
     assertThat(claim2.task()).isEqualTo("v2");
     assertThat(claim2.getTaskVersion()).isEqualTo(2);
-    claim2.complete();
+    claim2.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -1164,13 +1153,13 @@ public class KeyedTaskQueueTest {
 
     // Move time forward and fail the task
     testTime.set(10000);
-    claim1.fail();
+    claim1.fail().get(5, TimeUnit.SECONDS);
 
     // Claim again - should be attempt 2
     var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
     assertThat(claim2.getAttempts()).isEqualTo(2);
 
-    claim2.complete();
+    claim2.complete().get(5, TimeUnit.SECONDS);
   }
 
   @Test
@@ -1189,7 +1178,7 @@ public class KeyedTaskQueueTest {
     assertThat(worker2F.isDone()).isFalse();
 
     // Complete the first task
-    claim1.complete();
+    claim1.complete().get(5, TimeUnit.SECONDS);
 
     // Second worker should still be waiting (no more tasks)
     assertThat(worker2F.isDone()).isFalse();
