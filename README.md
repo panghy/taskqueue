@@ -24,13 +24,13 @@ Add the following dependency to your project:
 <dependency>
     <groupId>io.github.panghy</groupId>
     <artifactId>taskqueue</artifactId>
-    <version>0.1.0</version>
+    <version>0.2.0</version>
 </dependency>
 ```
 
 ### Gradle
 ```gradle
-implementation 'io.github.panghy:taskqueue:0.1.0'
+implementation 'io.github.panghy:taskqueue:0.2.0'
 ```
 
 ## Quick Start
@@ -42,50 +42,81 @@ import com.apple.foundationdb.directory.DirectoryLayer;
 import io.github.panghy.taskqueue.KeyedTaskQueue;
 import io.github.panghy.taskqueue.TaskQueueConfig;
 import io.github.panghy.taskqueue.serializers.StringSerializer;
+import java.util.concurrent.CompletableFuture;
 
 // Initialize FoundationDB
 FDB fdb = FDB.selectAPIVersion(730);
 Database db = fdb.open();
 DirectoryLayer directory = DirectoryLayer.getDefault();
 
-// Create configuration
-TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
-        db,
-        directory.createOrOpen(db, List.of("myapp", "tasks")).get(),
-        new StringSerializer(),
-        new StringSerializer())
-    .defaultTtl(Duration.ofMinutes(5))
-    .maxAttempts(3)
-    .defaultThrottle(Duration.ofSeconds(1))
-    .build();
+// Create configuration asynchronously
+directory.createOrOpen(db, List.of("myapp", "tasks"))
+    .thenCompose(dirSubspace -> {
+        TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+                db,
+                dirSubspace,
+                new StringSerializer(),
+                new StringSerializer())
+            .defaultTtl(Duration.ofMinutes(5))
+            .maxAttempts(3)
+            .defaultThrottle(Duration.ofSeconds(1))
+            .build();
+        
+        // Create or open the task queue
+        return KeyedTaskQueue.createOrOpen(config, db);
+    })
+    .thenCompose(queue -> {
+        // Enqueue a task
+        return queue.enqueue("user-123", "process-user-data")
+            .thenApply(taskKey -> {
+                System.out.println("Task enqueued: " + taskKey);
+                return queue;
+            });
+    })
+    .thenCompose(queue -> {
+        // Start worker loop
+        return processTasksAsync(queue, db);
+    });
 
-// Create or open the task queue
-KeyedTaskQueue<String, String> queue = KeyedTaskQueue.createOrOpen(config, db).get();
+// Async worker method
+private CompletableFuture<Void> processTasksAsync(
+        KeyedTaskQueue<String, String> queue, 
+        Database db) {
+    
+    return queue.awaitAndClaimTask(db)
+        .thenCompose(claim -> {
+            // Process the task
+            String taskKey = claim.taskKey();
+            String taskData = claim.task();
+            
+            System.out.println("Processing task: " + taskKey + " with data: " + taskData);
+            
+            // Your async task processing logic here
+            return processTaskAsync(taskKey, taskData)
+                .thenCompose(result -> {
+                    // Mark task as completed
+                    System.out.println("Task completed: " + taskKey);
+                    return claim.complete();
+                })
+                .exceptionallyCompose(error -> {
+                    // Mark task as failed (will be retried up to maxAttempts)
+                    System.err.println("Task failed: " + error.getMessage());
+                    // Properly chain the fail operation without blocking
+                    return claim.fail();
+                });
+        })
+        .thenCompose(v -> {
+            // Continue processing next task
+            return processTasksAsync(queue, db);
+        });
+}
 
-// Enqueue a task
-TaskKey taskKey = queue.enqueue("user-123", "process-user-data").get();
-
-// Worker loop - claim and process tasks
-while (true) {
-    TaskClaim<String, String> claim = queue.awaitAndClaimTask(db).get();
-
-    try {
-        // Process the task
-        String taskKey = claim.taskKey();
-        String taskData = claim.task();
-
-        System.out.println("Processing task: " + taskKey + " with data: " + taskData);
-
-        // Your task processing logic here
-        processTask(taskKey, taskData);
-
-        // Mark task as completed
-        claim.complete();
-
-    } catch (Exception e) {
-        // Mark task as failed (will be retried up to maxAttempts)
-        claim.fail();
-    }
+// Example async task processor
+private CompletableFuture<String> processTaskAsync(String key, String data) {
+    return CompletableFuture.supplyAsync(() -> {
+        // Simulate async work
+        return "Processed: " + key + " - " + data;
+    });
 }
 ```
 
@@ -93,15 +124,63 @@ while (true) {
 
 ```java
 // Enqueue with custom delay and TTL
-queue.enqueue("delayed-task", "data", Duration.ofMinutes(10), Duration.ofHours(1)).get();
+queue.enqueue("delayed-task", "data", Duration.ofMinutes(10), Duration.ofHours(1))
+    .thenAccept(taskKey -> {
+        System.out.println("Delayed task scheduled: " + taskKey);
+    });
 
 // Enqueue only if not already exists
-TaskKey key = queue.enqueueIfNotExists("unique-task", "data").get();
+queue.enqueueIfNotExists("unique-task", "data")
+    .thenAccept(taskKey -> {
+        if (taskKey != null) {
+            System.out.println("New task created: " + taskKey);
+        } else {
+            System.out.println("Task already exists");
+        }
+    });
 
 // Use within transactions
 db.runAsync(tr -> {
-    return queue.enqueue(tr, "tx-task", "data");
-}).get();
+    return queue.enqueue(tr, "tx-task", "data")
+        .thenCompose(taskKey -> {
+            // Perform other transactional operations
+            return someOtherOperation(tr)
+                .thenApply(result -> taskKey);
+        });
+})
+.thenAccept(taskKey -> {
+    System.out.println("Transaction completed, task: " + taskKey);
+});
+
+// Parallel task processing with multiple workers
+CompletableFuture<?>[] workers = new CompletableFuture[5];
+for (int i = 0; i < workers.length; i++) {
+    final int workerId = i;
+    workers[i] = processWorkerAsync(queue, db, workerId);
+}
+
+// Wait for all workers (or use CompletableFuture.allOf())
+CompletableFuture.allOf(workers)
+    .exceptionally(error -> {
+        System.err.println("Worker error: " + error);
+        return null;
+    });
+
+// Extend TTL for long-running tasks
+queue.awaitAndClaimTask(db)
+    .thenCompose(claim -> {
+        // Start processing
+        return startLongRunningTask(claim.task())
+            .thenCompose(intermediate -> {
+                // Extend TTL midway through processing
+                return claim.extend(Duration.ofMinutes(10))
+                    .thenCompose(v -> continueLongRunningTask(intermediate));
+            })
+            .thenCompose(result -> {
+                // Complete the task
+                return claim.complete();
+            });
+    });
 ```
 
 ## Configuration Options
@@ -117,20 +196,28 @@ The `TaskQueueConfig` supports the following configuration options:
 
 ### KeyedTaskQueue Methods
 
-- **`enqueue(key, task)`**: Enqueue a task with default settings
-- **`enqueue(key, task, delay, ttl)`**: Enqueue a task with custom delay and TTL
-- **`enqueueIfNotExists(key, task)`**: Enqueue only if no task exists for the key
-- **`awaitAndClaimTask()`**: Wait for and claim the next available task
-- **`completeTask(claim)`**: Mark a claimed task as completed
-- **`failTask(claim)`**: Mark a claimed task as failed (will be retried)
+All methods return `CompletableFuture` for async operations:
+
+- **`enqueue(key, task)`**: Enqueue a task with default settings → `CompletableFuture<TaskKeyMetadata>`
+- **`enqueue(key, task, delay, ttl)`**: Enqueue a task with custom delay and TTL → `CompletableFuture<TaskKeyMetadata>`
+- **`enqueueIfNotExists(key, task)`**: Enqueue only if no task exists for the key → `CompletableFuture<TaskKeyMetadata>`
+- **`awaitAndClaimTask(db)`**: Wait for and claim the next available task → `CompletableFuture<TaskClaim<K,T>>`
+- **`completeTask(claim)`**: Mark a claimed task as completed → `CompletableFuture<Void>`
+- **`failTask(claim)`**: Mark a claimed task as failed (will be retried) → `CompletableFuture<Void>`
+- **`extendTtl(claim, duration)`**: Extend the TTL of a claimed task → `CompletableFuture<Void>`
 
 ### TaskClaim Methods
 
-- **`complete()`**: Convenience method to complete the task
-- **`fail()`**: Convenience method to fail the task
-- **`taskKey()`**: Get the task key
-- **`task()`**: Get the task data
-- **`taskProto()`**: Get the internal task protocol buffer
+Convenience methods that return `CompletableFuture` for async operations:
+
+- **`complete()`**: Complete the task → `CompletableFuture<Void>`
+- **`fail()`**: Fail the task → `CompletableFuture<Void>`
+- **`extend(duration)`**: Extend the TTL → `CompletableFuture<Void>`
+- **`taskKey()`**: Get the task key (synchronous)
+- **`task()`**: Get the task data (synchronous)
+- **`getAttempts()`**: Get the number of attempts (synchronous)
+- **`getExpirationTime()`**: Get when this claim expires (synchronous)
+- **`isExpired()`**: Check if the claim has expired (synchronous)
 
 ## Requirements
 
