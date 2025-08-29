@@ -52,12 +52,13 @@ class SimpleTaskQueueWrapperTest {
   }
 
   @AfterEach
-  void tearDown() {
-    if (database != null) {
-      database.run(tr -> {
-        directory.remove(tr);
-        return null;
-      });
+  void tearDown() throws ExecutionException, InterruptedException, TimeoutException {
+    if (database != null && directory != null) {
+      database.runAsync(tr -> {
+            directory.remove(tr);
+            return CompletableFuture.completedFuture(null);
+          })
+          .get(5, TimeUnit.SECONDS);
     }
   }
 
@@ -79,7 +80,7 @@ class SimpleTaskQueueWrapperTest {
   }
 
   @Test
-  void testEnqueueWithDelay() throws ExecutionException, InterruptedException {
+  void testEnqueueWithDelay() throws ExecutionException, InterruptedException, TimeoutException {
     // Create a config with controlled time for testing delays
     var testTime = new AtomicLong(1000);
     var testConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
@@ -88,14 +89,8 @@ class SimpleTaskQueueWrapperTest {
         .build();
     taskQueue = TaskQueues.createSimpleTaskQueue(testConfig).get();
 
-    database.run(tr -> {
-      try {
-        taskQueue.enqueue(tr, "delayed-task", Duration.ofHours(1)).get();
-      } catch (InterruptedException | ExecutionException e) {
-        throw new RuntimeException(e);
-      }
-      return null;
-    });
+    database.runAsync(tr -> taskQueue.enqueue(tr, "delayed-task", Duration.ofHours(1)))
+        .get(5, TimeUnit.SECONDS);
 
     taskQueue.enqueue("immediate-task").get();
 
@@ -105,17 +100,9 @@ class SimpleTaskQueueWrapperTest {
   }
 
   @Test
-  void testEnqueueWithCustomTtl() throws ExecutionException, InterruptedException {
-    database.run(tr -> {
-      try {
-        taskQueue
-            .enqueue(tr, "custom-ttl-task", Duration.ZERO, Duration.ofHours(1))
-            .get();
-      } catch (InterruptedException | ExecutionException e) {
-        throw new RuntimeException(e);
-      }
-      return null;
-    });
+  void testEnqueueWithCustomTtl() throws ExecutionException, InterruptedException, TimeoutException {
+    database.runAsync(tr -> taskQueue.enqueue(tr, "custom-ttl-task", Duration.ZERO, Duration.ofHours(1)))
+        .get(5, TimeUnit.SECONDS);
 
     TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
     assertThat(claim).isNotNull();
@@ -170,44 +157,23 @@ class SimpleTaskQueueWrapperTest {
   }
 
   @Test
-  void testEnqueueInTransaction() throws ExecutionException, InterruptedException {
-    database.run(tr -> {
-      try {
-        taskQueue.enqueue(tr, "transactional-task").get();
-      } catch (InterruptedException | ExecutionException e) {
-        throw new RuntimeException(e);
-      }
-      return null;
-    });
+  void testEnqueueInTransaction() throws ExecutionException, InterruptedException, TimeoutException {
+    database.runAsync(tr -> taskQueue.enqueue(tr, "transactional-task")).get(5, TimeUnit.SECONDS);
 
     TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
     assertThat(claim.task()).isEqualTo("transactional-task");
 
-    database.run(tr -> {
-      try {
-        taskQueue.completeTask(tr, claim).get();
-      } catch (InterruptedException | ExecutionException e) {
-        throw new RuntimeException(e);
-      }
-      return null;
-    });
+    database.runAsync(tr -> taskQueue.completeTask(tr, claim)).get(5, TimeUnit.SECONDS);
   }
 
   @Test
-  void testFailTaskInTransaction() throws ExecutionException, InterruptedException {
+  void testFailTaskInTransaction() throws ExecutionException, InterruptedException, TimeoutException {
     taskQueue.enqueue("fail-in-tx").get();
 
     TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
     assertThat(claim.task()).isEqualTo("fail-in-tx");
 
-    database.run(tr -> {
-      try {
-        taskQueue.failTask(tr, claim).get();
-      } catch (InterruptedException | ExecutionException e) {
-        throw new RuntimeException(e);
-      }
-      return null;
-    });
+    database.runAsync(tr -> taskQueue.failTask(tr, claim)).get(5, TimeUnit.SECONDS);
 
     TaskClaim<UUID, String> reclaimedTask = taskQueue.awaitAndClaimTask().get();
     assertThat(reclaimedTask.task()).isEqualTo("fail-in-tx");
@@ -230,14 +196,14 @@ class SimpleTaskQueueWrapperTest {
   }
 
   @Test
-  void testExtendTtlUsingConvenienceMethod() throws ExecutionException, InterruptedException {
+  void testExtendTtlUsingConvenienceMethod() throws ExecutionException, InterruptedException, TimeoutException {
     taskQueue.enqueue("task-with-convenience").get();
 
     TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
     assertThat(claim.task()).isEqualTo("task-with-convenience");
 
     // Use convenience method
-    claim.extend(Duration.ofMinutes(20));
+    claim.extend(Duration.ofMinutes(20)).get(5, TimeUnit.SECONDS);
 
     taskQueue.completeTask(claim).get();
   }
