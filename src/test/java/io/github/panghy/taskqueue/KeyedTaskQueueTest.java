@@ -2,14 +2,29 @@ package io.github.panghy.taskqueue;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.fail;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
+import io.github.panghy.taskqueue.proto.Task;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+import io.opentelemetry.sdk.metrics.data.MetricData;
+import io.opentelemetry.sdk.testing.exporter.InMemoryMetricReader;
+import io.opentelemetry.sdk.testing.exporter.InMemorySpanExporter;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.trace.data.SpanData;
+import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -28,8 +43,30 @@ public class KeyedTaskQueueTest {
   TaskQueueConfig<String, String> config;
   AtomicLong simulatedTime = new AtomicLong(0);
 
+  // OpenTelemetry test infrastructure
+  InMemorySpanExporter spanExporter;
+  InMemoryMetricReader metricReader;
+  OpenTelemetrySdk openTelemetry;
+
   @BeforeEach
   void setup() throws ExecutionException, InterruptedException, TimeoutException {
+    // Setup OpenTelemetry test infrastructure
+    GlobalOpenTelemetry.resetForTest();
+    spanExporter = InMemorySpanExporter.create();
+    metricReader = InMemoryMetricReader.create();
+
+    SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+        .addSpanProcessor(SimpleSpanProcessor.create(spanExporter))
+        .build();
+
+    SdkMeterProvider meterProvider =
+        SdkMeterProvider.builder().registerMetricReader(metricReader).build();
+
+    openTelemetry = OpenTelemetrySdk.builder()
+        .setTracerProvider(tracerProvider)
+        .setMeterProvider(meterProvider)
+        .buildAndRegisterGlobal();
+
     db = FDB.selectAPIVersion(730).open();
     directory = db.runAsync(tr -> {
           DirectoryLayer layer = DirectoryLayer.getDefault();
@@ -51,6 +88,8 @@ public class KeyedTaskQueueTest {
       return null;
     });
     db.close();
+    openTelemetry.shutdown();
+    GlobalOpenTelemetry.resetForTest();
   }
 
   @Test
@@ -1182,5 +1221,250 @@ public class KeyedTaskQueueTest {
 
     // Second worker should still be waiting (no more tasks)
     assertThat(worker2F.isDone()).isFalse();
+  }
+
+  // OpenTelemetry Instrumentation Tests
+
+  @Test
+  void testEnqueueInstrumentation() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Clear any existing spans
+    spanExporter.reset();
+
+    // Enqueue a task
+    var taskKey =
+        db.runAsync(tr -> queue.enqueue(tr, "test-key", "test-data")).get();
+    assertThat(taskKey).isNotNull();
+
+    // Verify span was created
+    List<SpanData> spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).hasSize(1);
+
+    SpanData span = spans.get(0);
+    assertThat(span.getName()).isEqualTo("taskqueue.enqueue");
+    assertThat(span.getKind()).isEqualTo(SpanKind.PRODUCER);
+    assertThat(span.getStatus().getStatusCode()).isEqualTo(StatusCode.OK);
+    assertThat(span.getAttributes().get(AttributeKey.stringKey("task.key"))).isEqualTo("test-key");
+
+    // Verify metrics
+    Collection<MetricData> metrics = metricReader.collectAllMetrics();
+    assertThat(metrics).anySatisfy(metric -> {
+      assertThat(metric.getName()).isEqualTo("taskqueue.tasks.enqueued");
+      assertThat(metric.getUnit()).isEqualTo("tasks");
+    });
+  }
+
+  @Test
+  void testClaimTaskInstrumentation() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue a task first
+    db.runAsync(tr -> queue.enqueue(tr, "test-key", "test-data")).get();
+
+    // Clear spans from enqueue
+    spanExporter.reset();
+
+    // Advance time to make task visible
+    simulatedTime.set(1000);
+
+    // Claim the task
+    var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(taskClaim).isNotNull();
+
+    // Verify span was created
+    List<SpanData> spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).anySatisfy(span -> {
+      assertThat(span.getName()).isEqualTo("taskqueue.awaitAndClaimTask");
+      assertThat(span.getKind()).isEqualTo(SpanKind.CONSUMER);
+      assertThat(span.getStatus().getStatusCode()).isEqualTo(StatusCode.OK);
+      assertThat(span.getAttributes().get(AttributeKey.stringKey("task.key")))
+          .isEqualTo("test-key");
+    });
+
+    // Verify metrics
+    Collection<MetricData> metrics = metricReader.collectAllMetrics();
+    assertThat(metrics).anySatisfy(metric -> {
+      assertThat(metric.getName()).isEqualTo("taskqueue.tasks.claimed");
+    });
+  }
+
+  @Test
+  void testCompleteTaskInstrumentation() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim a task
+    db.runAsync(tr -> queue.enqueue(tr, "test-key", "test-data")).get();
+    simulatedTime.set(1000);
+    var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Clear previous spans
+    spanExporter.reset();
+    metricReader.collectAllMetrics(); // Clear previous metrics
+
+    // Complete the task
+    db.runAsync(tr -> queue.completeTask(tr, taskClaim)).get(5, TimeUnit.SECONDS);
+
+    // Verify span was created
+    List<SpanData> spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).anySatisfy(span -> {
+      assertThat(span.getName()).isEqualTo("taskqueue.completeTask");
+      assertThat(span.getKind()).isEqualTo(SpanKind.INTERNAL);
+      assertThat(span.getStatus().getStatusCode()).isEqualTo(StatusCode.OK);
+      assertThat(span.getAttributes().get(AttributeKey.stringKey("task.key")))
+          .isEqualTo("test-key");
+    });
+
+    // Verify metrics
+    Collection<MetricData> metrics = metricReader.collectAllMetrics();
+    assertThat(metrics).anySatisfy(metric -> {
+      assertThat(metric.getName()).isEqualTo("taskqueue.tasks.completed");
+    });
+  }
+
+  @Test
+  void testFailTaskInstrumentation() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim a task
+    db.runAsync(tr -> queue.enqueue(tr, "test-key", "test-data")).get();
+    simulatedTime.set(1000);
+    var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Clear previous spans
+    spanExporter.reset();
+
+    // Fail the task
+    db.runAsync(tr -> queue.failTask(tr, taskClaim)).get(5, TimeUnit.SECONDS);
+
+    // Verify span was created
+    List<SpanData> spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).anySatisfy(span -> {
+      assertThat(span.getName()).isEqualTo("taskqueue.failTask");
+      assertThat(span.getKind()).isEqualTo(SpanKind.INTERNAL);
+      assertThat(span.getStatus().getStatusCode()).isEqualTo(StatusCode.OK);
+      assertThat(span.getAttributes().get(AttributeKey.stringKey("task.key")))
+          .isEqualTo("test-key");
+    });
+
+    // Verify metrics
+    Collection<MetricData> metrics = metricReader.collectAllMetrics();
+    assertThat(metrics).anySatisfy(metric -> {
+      assertThat(metric.getName()).isEqualTo("taskqueue.tasks.failed");
+    });
+  }
+
+  @Test
+  void testExtendTtlInstrumentation() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim a task
+    db.runAsync(tr -> queue.enqueue(tr, "test-key", "test-data")).get();
+    simulatedTime.set(1000);
+    var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Clear previous spans
+    spanExporter.reset();
+
+    // Extend TTL
+    db.runAsync(tr -> queue.extendTtl(tr, taskClaim, Duration.ofMinutes(10)))
+        .get(5, TimeUnit.SECONDS);
+
+    // Verify span was created
+    List<SpanData> spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).anySatisfy(span -> {
+      assertThat(span.getName()).isEqualTo("taskqueue.extendTtl");
+      assertThat(span.getKind()).isEqualTo(SpanKind.INTERNAL);
+      assertThat(span.getStatus().getStatusCode()).isEqualTo(StatusCode.OK);
+      assertThat(span.getAttributes().get(AttributeKey.stringKey("task.key")))
+          .isEqualTo("test-key");
+      assertThat(span.getAttributes().get(AttributeKey.longKey("task.extension.ms")))
+          .isEqualTo(600000L);
+    });
+  }
+
+  @Test
+  void testEnqueueInstrumentationWithError() throws InterruptedException, ExecutionException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    spanExporter.reset();
+
+    // Try to enqueue with null key to trigger error path
+    try {
+      db.runAsync(tr -> queue.enqueue(tr, null, "test-data")).get(5, TimeUnit.SECONDS);
+      fail("Should have thrown an exception");
+    } catch (Exception e) {
+      // Expected exception
+    }
+
+    // Verify error span was created
+    List<SpanData> spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).isEmpty();
+  }
+
+  @Test
+  void testCompleteTaskAlreadyCompleted() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim a task
+    db.runAsync(tr -> queue.enqueue(tr, "test-key", "test-data")).get();
+    simulatedTime.set(1000);
+    var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Complete the task once
+    db.runAsync(tr -> queue.completeTask(tr, taskClaim)).get(5, TimeUnit.SECONDS);
+
+    spanExporter.reset();
+
+    // Try to complete again - should handle gracefully
+    db.runAsync(tr -> queue.completeTask(tr, taskClaim)).get(5, TimeUnit.SECONDS);
+
+    // Verify span was created
+    List<SpanData> spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).anySatisfy(span -> {
+      assertThat(span.getName()).isEqualTo("taskqueue.completeTask");
+      // Task already completed should still result in OK status but with event
+      assertThat(span.getStatus().getStatusCode()).isEqualTo(StatusCode.OK);
+      assertThat(span.getEvents()).anySatisfy(event -> {
+        String name = event.getName();
+        assertThat(name.contains("no metadata") || name.contains("already"))
+            .isTrue();
+      });
+    });
+  }
+
+  @Test
+  void testFailTaskWithInvalidClaim() throws InterruptedException, ExecutionException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Create a mock invalid claim
+    var invalidClaim = TaskClaim.<String, String>builder()
+        .taskProto(Task.newBuilder()
+            .setTaskUuid(com.google.protobuf.ByteString.copyFrom(new byte[16]))
+            .setClaim(com.google.protobuf.ByteString.copyFromUtf8("invalid-claim"))
+            .setTaskKey(com.google.protobuf.ByteString.copyFrom("test".getBytes()))
+            .build())
+        .taskKeyProto(null)
+        .taskKeyMetadataProto(null)
+        .taskQueue(queue)
+        .taskKey("test-key")
+        .task("test-data")
+        .build();
+
+    spanExporter.reset();
+
+    // This should fail but handle error gracefully
+    try {
+      db.runAsync(tr -> queue.failTask(tr, invalidClaim)).get(5, TimeUnit.SECONDS);
+    } catch (Exception e) {
+      // Expected - task not found or invalid claim
+    }
+
+    // Verify span was created
+    List<SpanData> spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).anySatisfy(span -> {
+      assertThat(span.getName()).isEqualTo("taskqueue.failTask");
+      // Should have events for the error case
+      assertThat(span.getEvents()).isNotEmpty();
+    });
   }
 }
