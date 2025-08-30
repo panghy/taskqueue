@@ -1355,6 +1355,50 @@ public class KeyedTaskQueueTest {
   }
 
   @Test
+  void testQueuePathInTelemetry() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Clear existing telemetry
+    spanExporter.reset();
+    metricReader.collectAllMetrics();
+
+    // Enqueue a task
+    db.runAsync(tr -> queue.enqueue(tr, "test-key", "test-data")).get();
+
+    // Verify span includes queue path
+    List<SpanData> spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).isNotEmpty();
+    assertThat(spans.get(0).getAttributes().get(AttributeKey.stringKey("taskqueue.path")))
+        .isNotNull()
+        .startsWith("/");
+
+    // Claim task and verify span
+    simulatedTime.set(1000);
+    spanExporter.reset();
+    var taskClaim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).anySatisfy(span -> {
+      assertThat(span.getName()).isEqualTo("taskqueue.awaitAndClaimTask");
+      assertThat(span.getAttributes().get(AttributeKey.stringKey("taskqueue.path")))
+          .isNotNull()
+          .startsWith("/");
+    });
+
+    // Complete task and verify span
+    spanExporter.reset();
+    db.runAsync(tr -> queue.completeTask(tr, taskClaim)).get(5, TimeUnit.SECONDS);
+
+    spans = spanExporter.getFinishedSpanItems();
+    assertThat(spans).anySatisfy(span -> {
+      assertThat(span.getName()).isEqualTo("taskqueue.completeTask");
+      assertThat(span.getAttributes().get(AttributeKey.stringKey("taskqueue.path")))
+          .isNotNull()
+          .startsWith("/");
+    });
+  }
+
+  @Test
   void testExtendTtlInstrumentation() throws ExecutionException, InterruptedException, TimeoutException {
     var queue = KeyedTaskQueue.createOrOpen(config, db).get();
 

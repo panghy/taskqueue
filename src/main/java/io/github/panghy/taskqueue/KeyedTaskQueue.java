@@ -74,12 +74,14 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   private static final AttributeKey<Long> TASK_ATTEMPTS = AttributeKey.longKey("task.attempts");
   private static final AttributeKey<Long> DELAY_MS = AttributeKey.longKey("task.delay.ms");
   private static final AttributeKey<Long> TTL_MS = AttributeKey.longKey("task.ttl.ms");
+  private static final AttributeKey<String> QUEUE_PATH = AttributeKey.stringKey("taskqueue.path");
 
   private final TaskQueueConfig<K, T> config;
   private final DirectorySubspace unclaimedTasks;
   private final DirectorySubspace claimedTasks;
   private final DirectorySubspace taskKeys;
   private final byte[] watchKey;
+  private final String queuePath;
 
   /**
    * Private constructor. Use {@link #createOrOpen(TaskQueueConfig, TransactionContext)} to create an instance.
@@ -95,6 +97,10 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     this.claimedTasks = claimedTasks;
     this.taskKeys = taskKeys;
     this.watchKey = watchKey;
+
+    // Get the queue path from the directory
+    List<String> pathComponents = config.getDirectory().getPath();
+    this.queuePath = pathComponents.isEmpty() ? "/" : "/" + String.join("/", pathComponents);
 
     // Initialize OpenTelemetry instrumentation
     this.tracer = GlobalOpenTelemetry.getTracer("io.github.panghy.taskqueue", "0.3.0");
@@ -200,6 +206,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .setAttribute(TASK_KEY, String.valueOf(taskKey))
         .setAttribute(DELAY_MS, delay.toMillis())
         .setAttribute(TTL_MS, ttl.toMillis())
+        .setAttribute(QUEUE_PATH, queuePath)
         .startSpan();
 
     // unique task uuid.
@@ -252,7 +259,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           TaskKeyMetadata result = setMetadataF.join();
 
           // Record metrics
-          tasksEnqueued.add(1);
+          tasksEnqueued.add(1, Attributes.of(QUEUE_PATH, queuePath));
 
           span.setStatus(StatusCode.OK).end();
           return result;
@@ -269,6 +276,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   public CompletableFuture<TaskClaim<K, T>> awaitAndClaimTask(Database db) {
     Span span = tracer.spanBuilder("taskqueue.awaitAndClaimTask")
         .setSpanKind(SpanKind.CONSUMER)
+        .setAttribute(QUEUE_PATH, queuePath)
         .startSpan();
 
     AtomicReference<TaskClaim<K, T>> ref = new AtomicReference<>();
@@ -347,11 +355,11 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               long waitTime = config.getInstantSource().instant().toEpochMilli()
                   - toJavaTimestamp(claim.taskProto().getCreationTime())
                       .toEpochMilli();
-              taskWaitTime.record(waitTime);
+              taskWaitTime.record(waitTime, Attributes.of(QUEUE_PATH, queuePath));
               span.setAttribute("task.wait.time.ms", waitTime);
             }
 
-            tasksClaimed.add(1);
+            tasksClaimed.add(1, Attributes.of(QUEUE_PATH, queuePath));
             span.addEvent("Task claimed successfully")
                 .setStatus(StatusCode.OK)
                 .end();
@@ -376,6 +384,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .setAttribute(TASK_KEY, String.valueOf(taskClaim.taskKey()))
         .setAttribute(TASK_VERSION, taskClaim.getTaskVersion())
         .setAttribute(TASK_ATTEMPTS, taskClaim.getAttempts())
+        .setAttribute(QUEUE_PATH, queuePath)
         .startSpan();
 
     ByteString taskKeyBytes = taskClaim.taskProto().getTaskKey();
@@ -461,11 +470,11 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               long duration = config.getInstantSource().instant().toEpochMilli()
                   - toJavaTimestamp(taskClaim.taskProto().getCreationTime())
                       .toEpochMilli();
-              taskProcessingDuration.record(duration);
+              taskProcessingDuration.record(duration, Attributes.of(QUEUE_PATH, queuePath));
               span.setAttribute("task.processing.duration.ms", duration);
             }
 
-            tasksCompleted.add(1);
+            tasksCompleted.add(1, Attributes.of(QUEUE_PATH, queuePath));
             span.addEvent("Task completed successfully")
                 .setStatus(StatusCode.OK)
                 .end();
@@ -485,6 +494,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .setAttribute(TASK_UUID, taskClaim.getTaskUuid().toString())
         .setAttribute(TASK_KEY, String.valueOf(taskClaim.taskKey()))
         .setAttribute("task.extension.ms", extension.toMillis())
+        .setAttribute(QUEUE_PATH, queuePath)
         .startSpan();
 
     ByteString taskKeyBytes = taskClaim.taskProto().getTaskKey();
@@ -563,6 +573,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .setAttribute(TASK_KEY, String.valueOf(taskClaim.taskKey()))
         .setAttribute(TASK_VERSION, taskClaim.getTaskVersion())
         .setAttribute(TASK_ATTEMPTS, taskClaim.getAttempts())
+        .setAttribute(QUEUE_PATH, queuePath)
         .startSpan();
 
     ByteString taskKeyBytes = taskClaim.taskProto().getTaskKey();
@@ -651,7 +662,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                 .end();
             throw new CompletionException(error);
           } else {
-            tasksFailed.add(1);
+            tasksFailed.add(1, Attributes.of(QUEUE_PATH, queuePath));
 
             span.addEvent("Task marked as failed", Attributes.of(TASK_ATTEMPTS, taskClaim.getAttempts()))
                 .setStatus(StatusCode.OK)
