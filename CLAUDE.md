@@ -78,7 +78,7 @@
 7. **Auto-merge the Version Bump PR**
    ```bash
    # Enable auto-merge for the PR (requires admin or write permissions)
-   gh pr merge --auto --merge
+   gh pr merge --auto --rebase
    ```
 
 ### Automated Publishing
