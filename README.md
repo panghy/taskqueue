@@ -13,6 +13,7 @@ A distributed task queue library backed by FoundationDB, providing reliable task
 - **Task expiration and reclaiming** for fault tolerance
 - **Retry logic** with configurable max attempts
 - **Transaction support** for atomic operations
+- **OpenTelemetry instrumentation** for distributed tracing and metrics
 - **Built on FoundationDB** for reliability and scalability
 
 ## Installation
@@ -191,6 +192,52 @@ The `TaskQueueConfig` supports the following configuration options:
 - **`maxAttempts`**: Maximum number of retry attempts per task (default: 3)
 - **`defaultThrottle`**: Minimum time between task executions for the same key (default: 0)
 - **`instantSource`**: Custom time source for testing (default: system time)
+
+## Observability with OpenTelemetry
+
+TaskQueue includes built-in OpenTelemetry instrumentation for distributed tracing and metrics collection. All major operations are automatically instrumented with spans and metrics.
+
+### Tracing
+
+The following operations create spans:
+- `enqueue` - Tracks task enqueuing with task key and delay attributes
+- `awaitAndClaimTask` - Tracks the claim process including wait time
+- `completeTask` - Tracks task completion with processing duration
+- `failTask` - Tracks task failures with error details
+- `extendTtl` - Tracks TTL extension operations
+
+### Metrics
+
+The following metrics are automatically collected:
+- `taskqueue.tasks.enqueued` - Counter of tasks enqueued
+- `taskqueue.tasks.claimed` - Counter of tasks claimed by workers
+- `taskqueue.tasks.completed` - Counter of successfully completed tasks
+- `taskqueue.tasks.failed` - Counter of failed tasks
+- `taskqueue.task.processing.duration` - Histogram of task processing time (ms)
+- `taskqueue.task.wait.time` - Histogram of time tasks wait before being claimed (ms)
+
+### Setup
+
+To enable observability, configure OpenTelemetry in your application:
+
+```java
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.sdk.OpenTelemetrySdk;
+import io.opentelemetry.sdk.trace.SdkTracerProvider;
+import io.opentelemetry.sdk.metrics.SdkMeterProvider;
+
+// Configure OpenTelemetry SDK (example with OTLP exporter)
+OpenTelemetrySdk openTelemetry = OpenTelemetrySdk.builder()
+    .setTracerProvider(SdkTracerProvider.builder()
+        // Add your span processor/exporter here
+        .build())
+    .setMeterProvider(SdkMeterProvider.builder()
+        // Add your metric reader/exporter here
+        .build())
+    .buildAndRegisterGlobal();
+
+// TaskQueue will automatically use the global OpenTelemetry instance
+```
 
 ## API Reference
 
