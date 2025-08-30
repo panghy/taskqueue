@@ -40,7 +40,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.logging.Logger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A distributed task queue library backed by FoundationDB with the ability to deduplicate tasks based on a key.
@@ -50,7 +51,7 @@ import java.util.logging.Logger;
  */
 public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
-  private static final Logger LOGGER = Logger.getLogger(KeyedTaskQueue.class.getName());
+  private static final Logger LOGGER = LoggerFactory.getLogger(KeyedTaskQueue.class);
   private static final SecureRandom random = new SecureRandom();
 
   private static final String METADATA_KEY = "metadata";
@@ -384,8 +385,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .thenCompose(taskMetadataProto -> {
           if (taskMetadataProto == null) {
             // likely a retry of a task that has already been completed.
-            LOGGER.warning(
-                "Task " + describeTask(taskUuid, taskClaim.task()) + " has no metadata. Skipping.");
+            LOGGER.warn("Task {} has no metadata. Skipping.", describeTask(taskUuid, taskClaim.task()));
             span.addEvent("Task has no metadata. Skipping.")
                 .setStatus(StatusCode.OK)
                 .end();
@@ -397,8 +397,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                   .getClaim()
                   .equals(taskClaim.taskProto().getClaim())) {
             // task likely took too long to complete and another worker already picked it up.
-            LOGGER.warning("Task " + describeTask(taskUuid, taskClaim.task())
-                + " is not the current claim. Skipping.");
+            LOGGER.warn(
+                "Task {} is not the current claim. Skipping.",
+                describeTask(taskUuid, taskClaim.task()));
             span.addEvent("Task is not the current claim. Skipping.")
                 .setStatus(StatusCode.OK)
                 .end();
@@ -418,10 +419,11 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             // another version of the task needs to be scheduled.
             var taskKeyF = getTaskKeyAsync(tr, taskKeyBytes, taskMetadataProto.getHighestVersionSeen());
             return taskKeyF.thenApply(taskKeyProto -> {
-              LOGGER.info("Scheduling next version of task: " + describeTask(taskUuid, taskClaim.task())
-                  + ": "
-                  + taskClaim.taskProto().getTaskVersion() + " -> "
-                  + taskMetadataProto.getHighestVersionSeen());
+              LOGGER.info(
+                  "Scheduling next version of task: {}: {} -> {}",
+                  describeTask(taskUuid, taskClaim.task()),
+                  taskClaim.taskProto().getTaskVersion(),
+                  taskMetadataProto.getHighestVersionSeen());
               Instant expectedExecutionTime = toJavaTimestamp(taskKeyProto.getExpectedExecutionTime());
               if (expectedExecutionTime.isBefore(
                   config.getInstantSource().instant())) {
@@ -492,8 +494,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .thenCompose(taskMetadataProto -> {
           if (taskMetadataProto == null) {
             // likely a retry of a task that has already been completed.
-            LOGGER.warning(
-                "Task " + describeTask(taskUuid, taskClaim.task()) + " has no metadata. Skipping.");
+            LOGGER.warn("Task {} has no metadata. Skipping.", describeTask(taskUuid, taskClaim.task()));
             return completedFuture(null);
           }
           // Check if the task has been claimed by another worker
@@ -572,8 +573,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .thenCompose(taskMetadataProto -> {
           if (taskMetadataProto == null) {
             // likely a retry of a task that has already been completed.
-            LOGGER.warning(
-                "Task " + describeTask(taskUuid, taskClaim.task()) + " has no metadata. Skipping.");
+            LOGGER.warn("Task {} has no metadata. Skipping.", describeTask(taskUuid, taskClaim.task()));
             return completedFuture(null);
           }
           if (taskMetadataProto.hasCurrentClaim()
@@ -582,8 +582,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                   .getClaim()
                   .equals(taskClaim.taskProto().getClaim())) {
             // task likely took too long to complete and another worker already picked it up.
-            LOGGER.warning("Task " + describeTask(taskUuid, taskClaim.task())
-                + " is not the current claim. Skipping.");
+            LOGGER.warn(
+                "Task {} is not the current claim. Skipping.",
+                describeTask(taskUuid, taskClaim.task()));
             return completedFuture(null);
           }
           // remove the task from claimed space.
@@ -804,8 +805,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                 "task version mismatch (in claimed space): " + printable(taskKV.getKey()));
           }
         } else {
-          LOGGER.warning("Task " + printable(taskKV.getKey())
-              + " has no current claim but is in claimed space. " + "Reclaiming.");
+          LOGGER.warn(
+              "Task {} has no current claim but is in claimed space. Reclaiming.",
+              printable(taskKV.getKey()));
         }
         T taskObj = config.getTaskSerializer().deserialize(latestTaskKey.getTask());
         UUID taskUuid = bytesToUuid(taskProto.getTaskUuid().toByteArray());

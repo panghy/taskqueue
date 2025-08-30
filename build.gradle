@@ -42,6 +42,9 @@ dependencies {
   // Protobuf
   implementation 'com.google.protobuf:protobuf-java:4.28.2'
 
+  // Logging
+  implementation 'org.slf4j:slf4j-api:2.0.12'
+
   // OpenTelemetry
   implementation 'io.opentelemetry:opentelemetry-api:1.40.0'
   implementation 'io.opentelemetry:opentelemetry-context:1.40.0'
