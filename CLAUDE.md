@@ -75,6 +75,12 @@
      --base main
    ```
 
+7. **Auto-merge the Version Bump PR**
+   ```bash
+   # Enable auto-merge for the PR (requires admin or write permissions)
+   gh pr merge --auto --merge
+   ```
+
 ### Automated Publishing
 The `.github/workflows/publish.yml` workflow automatically:
 - Triggers on GitHub release creation
