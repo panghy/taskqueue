@@ -183,7 +183,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   @Override
   public CompletableFuture<TaskKeyMetadata> enqueue(Transaction tr, K taskKey, T task, Duration delay, Duration ttl) {
-    // check for nulls.
+    // Check for nulls.
     if (taskKey == null || task == null) {
       throw new IllegalArgumentException("taskKey and task cannot be null");
     }
