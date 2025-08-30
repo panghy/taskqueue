@@ -420,7 +420,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             var taskKeyF = getTaskKeyAsync(tr, taskKeyBytes, taskMetadataProto.getHighestVersionSeen());
             return taskKeyF.thenApply(taskKeyProto -> {
               LOGGER.info(
-                  "Scheduling next version of task: {}: {} -> {}",
+                  "Scheduling next version of task {}: version {} -> {}",
                   describeTask(taskUuid, taskClaim.task()),
                   taskClaim.taskProto().getTaskVersion(),
                   taskMetadataProto.getHighestVersionSeen());
