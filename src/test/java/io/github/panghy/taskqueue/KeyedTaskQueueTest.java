@@ -1511,4 +1511,44 @@ public class KeyedTaskQueueTest {
       assertThat(span.getEvents()).isNotEmpty();
     });
   }
+
+  @Test
+  void testIsEmpty() throws InterruptedException, ExecutionException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Queue should be empty initially
+    assertThat(queue.isEmpty().get()).isTrue();
+
+    // Enqueue a task
+    queue.enqueue("key1", "data1").get();
+    assertThat(queue.isEmpty().get()).isFalse();
+
+    // Claim the task
+    var claim = queue.awaitAndClaimTask().get();
+    assertThat(queue.isEmpty().get()).isFalse(); // Still not empty (task is claimed)
+
+    // Complete the task
+    queue.completeTask(claim).get();
+    assertThat(queue.isEmpty().get()).isTrue(); // Now empty again
+  }
+
+  @Test
+  void testIsEmptyWithMultipleTasks() throws InterruptedException, ExecutionException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Add multiple tasks
+    queue.enqueue("key1", "data1").get();
+    queue.enqueue("key2", "data2").get();
+    assertThat(queue.isEmpty().get()).isFalse();
+
+    // Claim and complete first task
+    var claim1 = queue.awaitAndClaimTask().get();
+    queue.completeTask(claim1).get();
+    assertThat(queue.isEmpty().get()).isFalse(); // Still has second task
+
+    // Claim and complete second task
+    var claim2 = queue.awaitAndClaimTask().get();
+    queue.completeTask(claim2).get();
+    assertThat(queue.isEmpty().get()).isTrue(); // Now empty
+  }
 }

@@ -233,4 +233,41 @@ class SimpleTaskQueueWrapperTest {
 
     taskQueue.completeTask(claim).get();
   }
+
+  @Test
+  void testIsEmpty() throws ExecutionException, InterruptedException {
+    // Queue should be empty initially
+    assertThat(taskQueue.isEmpty().get()).isTrue();
+
+    // Enqueue a task
+    taskQueue.enqueue("test-task").get();
+    assertThat(taskQueue.isEmpty().get()).isFalse();
+
+    // Claim the task
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+    assertThat(taskQueue.isEmpty().get()).isFalse(); // Still not empty (task is claimed)
+
+    // Complete the task
+    taskQueue.completeTask(claim).get();
+    assertThat(taskQueue.isEmpty().get()).isTrue(); // Now empty again
+  }
+
+  @Test
+  void testIsEmptyWithTransaction() throws ExecutionException, InterruptedException, TimeoutException {
+    // Test isEmpty within a transaction
+    Boolean emptyResult = database.runAsync(tr -> taskQueue.isEmpty(tr)).get(5, TimeUnit.SECONDS);
+    assertThat(emptyResult).isTrue();
+
+    // Add task and check again in transaction
+    database.runAsync(tr -> {
+          return taskQueue.enqueue(tr, "tx-task").thenCompose(v -> taskQueue.isEmpty(tr));
+        })
+        .get(5, TimeUnit.SECONDS);
+
+    assertThat(taskQueue.isEmpty().get()).isFalse();
+
+    // Clean up
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+    taskQueue.completeTask(claim).get();
+  }
 }

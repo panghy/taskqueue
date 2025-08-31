@@ -159,4 +159,21 @@ public interface SimpleTaskQueue<T> {
    * @return A future that completes when the TTL has been extended.
    */
   CompletableFuture<Void> extendTtl(Transaction tr, TaskClaim<UUID, T> taskClaim, Duration extension);
+
+  /**
+   * Checks whether the queue is empty.
+   *
+   * @return A future that completes with true if the queue is empty, false otherwise.
+   */
+  default CompletableFuture<Boolean> isEmpty() {
+    return runAsync(this::isEmpty);
+  }
+
+  /**
+   * Checks whether the queue is empty.
+   *
+   * @param tr The transaction to use for the operation.
+   * @return A future that completes with true if the queue is empty, false otherwise.
+   */
+  CompletableFuture<Boolean> isEmpty(Transaction tr);
 }

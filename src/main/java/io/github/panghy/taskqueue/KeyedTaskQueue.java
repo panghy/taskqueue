@@ -1017,4 +1017,13 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   static Duration toJavaDuration(com.google.protobuf.Duration duration) {
     return Duration.ofSeconds(duration.getSeconds()).plusNanos(duration.getNanos());
   }
+
+  @Override
+  public CompletableFuture<Boolean> isEmpty(Transaction tr) {
+    CompletableFuture<Boolean> unclaimedEmpty =
+        tr.getRange(unclaimedTasks.range(), 1).asList().thenApply(List::isEmpty);
+    CompletableFuture<Boolean> claimedEmpty =
+        tr.getRange(claimedTasks.range(), 1).asList().thenApply(List::isEmpty);
+    return unclaimedEmpty.thenCombine(claimedEmpty, (u, c) -> u && c);
+  }
 }
