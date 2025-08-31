@@ -56,4 +56,9 @@ public class SimpleTaskQueueWrapper<T> implements SimpleTaskQueue<T> {
   public CompletableFuture<Void> extendTtl(Transaction tr, TaskClaim<UUID, T> taskClaim, Duration extension) {
     return taskQueue.extendTtl(tr, taskClaim, extension);
   }
+
+  @Override
+  public CompletableFuture<Boolean> isEmpty(Transaction tr) {
+    return taskQueue.isEmpty(tr);
+  }
 }
