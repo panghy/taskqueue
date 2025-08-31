@@ -57,21 +57,22 @@
    
    This will automatically trigger the publish workflow to deploy to Maven Central.
 
-5. **Update Version for Next Development Cycle**
+5. **Update Version for Next Development Cycle and README**
    ```bash
    git checkout -b chore/bump-version-X.Y+1.0
-   git checkout main build.gradle  # Get latest from main
+   git checkout main build.gradle README.md  # Get latest from main
    # Edit build.gradle to set version = 'X.Y+1.0-SNAPSHOT'
-   git add build.gradle
-   git commit -m "chore: bump version to X.Y+1.0-SNAPSHOT for next development cycle"
+   # Edit README.md to update Maven/Gradle dependency version to X.Y.Z (the just-released version)
+   git add build.gradle README.md
+   git commit -m "chore: bump version to X.Y+1.0-SNAPSHOT and update README to X.Y.Z"
    git push -u origin chore/bump-version-X.Y+1.0
    ```
 
 6. **Create PR for Version Bump**
    ```bash
    gh pr create \
-     --title "chore: bump version to X.Y+1.0-SNAPSHOT" \
-     --body "Bump version for next development cycle after X.Y.Z release" \
+     --title "chore: bump version to X.Y+1.0-SNAPSHOT and update README" \
+     --body "- Bump version for next development cycle after X.Y.Z release\n- Update README.md with latest release version X.Y.Z" \
      --base main
    ```
 
