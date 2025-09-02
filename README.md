@@ -25,13 +25,13 @@ Add the following dependency to your project:
 <dependency>
     <groupId>io.github.panghy</groupId>
     <artifactId>taskqueue</artifactId>
-    <version>0.4.0</version>
+    <version>0.5.0</version>
 </dependency>
 ```
 
 ### Gradle
 ```gradle
-implementation 'io.github.panghy:taskqueue:0.4.0'
+implementation 'io.github.panghy:taskqueue:0.5.0'
 ```
 
 ## Quick Start
