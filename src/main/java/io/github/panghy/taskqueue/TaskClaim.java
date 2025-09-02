@@ -190,4 +190,25 @@ public record TaskClaim<K, T>(
   public boolean isExpired() {
     return taskQueue.getConfig().getInstantSource().instant().isAfter(getExpirationTime());
   }
+
+  /**
+   * Returns a string representation that excludes sensitive proto data.
+   * This prevents accidental logging of task content.
+   *
+   * @return a safe string representation
+   */
+  @Override
+  public String toString() {
+    String taskName = task == null
+        ? "null"
+        : taskQueue.getConfig().getTaskNameExtractor().apply(task);
+    return "TaskClaim{" + "taskUuid="
+        + getTaskUuid() + ", taskName="
+        + taskName + ", taskKey="
+        + taskKey + ", attempts="
+        + getAttempts() + ", version="
+        + getTaskVersion() + ", claimUuid="
+        + getClaimUuid() + ", expirationTime="
+        + getExpirationTime() + '}';
+  }
 }
