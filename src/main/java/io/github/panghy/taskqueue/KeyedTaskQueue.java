@@ -708,6 +708,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               "Task {} has no metadata. Removing orphaned unclaimed task entry.",
               bytesToUuid(taskProto.getTaskUuid().toByteArray()));
           tr.clear(taskKV.getKey());
+          tr.clear(taskKeys.pack(Tuple.from(taskKey.toByteArray(), taskProto.getTaskVersion())));
           return Optional.empty();
         }
         TaskKey taskKeyProto = taskKeyF.join();
@@ -724,10 +725,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         if (taskProto.getAttempts() >= config.getMaxAttempts()) {
           LOGGER.info("Task " + describeTask(taskUuid, taskObj) + " has reached max attempts: " + attempts);
           tr.clear(taskKV.getKey());
-          // this technically does not mean that there are no unclaimed tasks but we need to go through
-          // another round to find one. we should ideally not re-insert tasks into the queue if they have
-          // reached max
-          // attempts.
+          tr.clear(taskKeys.pack(Tuple.from(taskKey.toByteArray(), taskProto.getTaskVersion())));
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
           LOGGER.info("Task " + describeTask(taskUuid, taskObj) + " is not the latest version: "
@@ -790,7 +788,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         return Optional.empty();
       }
       return Optional.of(
-          Instant.ofEpochMilli(Tuple.fromBytes(v.get(0).getKey()).getLong(0)));
+          Instant.ofEpochMilli(subspace.unpack(v.get(0).getKey()).getLong(0)));
     });
   }
 
@@ -830,6 +828,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               "Task {} has no metadata. Removing orphaned claimed task entry.",
               bytesToUuid(taskProto.getTaskUuid().toByteArray()));
           tr.clear(taskKV.getKey());
+          tr.clear(taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), taskProto.getTaskVersion())));
           return Optional.empty();
         }
         TaskKey latestTaskKey = highestTaskKeyF.join();
@@ -856,6 +855,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         if (taskProto.getAttempts() >= config.getMaxAttempts()) {
           LOGGER.info("Task " + describeTask(taskUuid, taskObj) + " has reached max attempts: " + attempts);
           tr.clear(taskKV.getKey());
+          tr.clear(taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), taskProto.getTaskVersion())));
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
           LOGGER.info("Task " + describeTask(taskUuid, taskObj) + " is not the latest version: "

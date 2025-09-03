@@ -1623,8 +1623,8 @@ public class KeyedTaskQueueTest {
     // Now no visible tasks
     assertThat(queue.hasVisibleUnclaimedTasks().get()).isFalse();
 
-    // Clean up remaining tasks after they become visible
-    Thread.sleep(10500);
+    // Advance time to make other tasks visible
+    simulatedTime.set(20000);
     while (queue.hasVisibleUnclaimedTasks().get()) {
       var c = queue.awaitAndClaimTask().get();
       queue.completeTask(c).get();
@@ -1636,27 +1636,24 @@ public class KeyedTaskQueueTest {
     var queue = KeyedTaskQueue.createOrOpen(config, db).get();
 
     // Manually create an orphaned task entry without metadata to simulate the error condition
-    db.runAsync(tr -> {
-          return config.getDirectory()
-              .createOrOpen(tr, List.of("unclaimed"))
-              .thenAccept(unclaimedTasks -> {
-                var taskUuid = UUID.randomUUID();
-                var taskProto = Task.newBuilder()
-                    .setTaskUuid(ByteString.copyFrom(KeyedTaskQueue.uuidToBytes(taskUuid)))
-                    .setCreationTime(Timestamp.newBuilder()
-                        .setSeconds(1)
-                        .build())
-                    .setTaskKey(ByteString.copyFromUtf8("orphaned-key"))
-                    .setTaskVersion(1)
-                    .setAttempts(0)
-                    .build();
+    db.runAsync(tr -> config.getDirectory()
+            .createOrOpen(tr, List.of("unclaimed_tasks"))
+            .thenAccept(unclaimedTasks -> {
+              // lowest possible uuid so it alwasy comes first.
+              var taskUuid = UUID.fromString("00000000-0000-0000-0000-000000000000");
+              var taskProto = Task.newBuilder()
+                  .setTaskUuid(ByteString.copyFrom(KeyedTaskQueue.uuidToBytes(taskUuid)))
+                  .setCreationTime(
+                      Timestamp.newBuilder().setSeconds(1).build())
+                  .setTaskKey(ByteString.copyFromUtf8("orphaned-key"))
+                  .setTaskVersion(1)
+                  .setAttempts(0)
+                  .build();
 
-                // Create task entry without corresponding metadata - this simulates the NPE condition
-                var taskKey =
-                    unclaimedTasks.pack(Tuple.from(1000L, KeyedTaskQueue.uuidToBytes(taskUuid)));
-                tr.set(taskKey, taskProto.toByteArray());
-              });
-        })
+              // Create task entry without corresponding metadata - this simulates the NPE condition
+              var taskKey = unclaimedTasks.pack(Tuple.from(0L, KeyedTaskQueue.uuidToBytes(taskUuid)));
+              tr.set(taskKey, taskProto.toByteArray());
+            }))
         .get();
 
     // Now enqueue a valid task that should be claimable
@@ -1677,7 +1674,8 @@ public class KeyedTaskQueueTest {
     // Complete the valid task
     claim.complete().get();
 
-    // Queue should now be empty (orphaned task was cleaned up, valid task was completed)
+    // The orphaned task is still there but can't be claimed because it has no metadata
+    // isEmpty will return false because it just checks for existence of tasks
     assertThat(queue.isEmpty().get()).isTrue();
   }
 }

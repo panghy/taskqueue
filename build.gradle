@@ -67,6 +67,8 @@ dependencies {
   testImplementation 'io.opentelemetry:opentelemetry-sdk-testing:1.40.0'
   testImplementation 'io.opentelemetry:opentelemetry-sdk-metrics:1.40.0'
   testImplementation 'io.opentelemetry:opentelemetry-sdk-trace:1.40.0'
+
+  testRuntimeOnly 'org.slf4j:slf4j-simple:2.0.9'
 }
 
 protobuf {
