@@ -693,11 +693,24 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
       }
       ByteString taskKey = taskProto.getTaskKey();
       var taskKeyMetadataF = getTaskMetadataAsync(tr, taskKey);
-      var taskKeyF = taskKeyMetadataF.thenCompose(
-          metadata -> getTaskKeyAsync(tr, taskKey, metadata.getHighestVersionSeen()));
+      var taskKeyF = taskKeyMetadataF.thenCompose(metadata -> {
+        if (metadata == null) {
+          // Task has no metadata - skip it
+          return completedFuture(null);
+        }
+        return getTaskKeyAsync(tr, taskKey, metadata.getHighestVersionSeen());
+      });
       return allOf(taskKeyF, taskKeyMetadataF).thenApply(v -> {
-        TaskKey taskKeyProto = taskKeyF.join();
         TaskKeyMetadata taskKeyMetadataProto = taskKeyMetadataF.join();
+        if (taskKeyMetadataProto == null) {
+          // Task has no metadata - clean up orphaned task entry
+          LOGGER.warn(
+              "Task {} has no metadata. Removing orphaned unclaimed task entry.",
+              bytesToUuid(taskProto.getTaskUuid().toByteArray()));
+          tr.clear(taskKV.getKey());
+          return Optional.empty();
+        }
+        TaskKey taskKeyProto = taskKeyF.join();
         if (taskKeyMetadataProto.hasCurrentClaim()) {
           throw new TaskQueueException(
               "task already claimed (but found in unclaimed space): " + printable(taskKV.getKey()));
@@ -802,11 +815,24 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
       }
       ByteString taskKeyBytes = taskProto.getTaskKey();
       var taskKeyMetadataF = getTaskMetadataAsync(tr, taskKeyBytes);
-      var highestTaskKeyF = taskKeyMetadataF.thenCompose(taskKeyMetadataProto ->
-          getTaskKeyAsync(tr, taskKeyBytes, taskKeyMetadataProto.getHighestVersionSeen()));
+      var highestTaskKeyF = taskKeyMetadataF.thenCompose(taskKeyMetadataProto -> {
+        if (taskKeyMetadataProto == null) {
+          // Task has no metadata - skip it
+          return completedFuture(null);
+        }
+        return getTaskKeyAsync(tr, taskKeyBytes, taskKeyMetadataProto.getHighestVersionSeen());
+      });
       return allOf(highestTaskKeyF, taskKeyMetadataF).thenApply(v -> {
-        TaskKey latestTaskKey = highestTaskKeyF.join();
         TaskKeyMetadata taskKeyMetadataProto = taskKeyMetadataF.join();
+        if (taskKeyMetadataProto == null) {
+          // Task has no metadata - clean up orphaned task entry
+          LOGGER.warn(
+              "Task {} has no metadata. Removing orphaned claimed task entry.",
+              bytesToUuid(taskProto.getTaskUuid().toByteArray()));
+          tr.clear(taskKV.getKey());
+          return Optional.empty();
+        }
+        TaskKey latestTaskKey = highestTaskKeyF.join();
         if (taskKeyMetadataProto.hasCurrentClaim()) {
           if (!taskKeyMetadataProto.getCurrentClaim().getClaim().equals(taskProto.getClaim())) {
             throw new TaskQueueException(
