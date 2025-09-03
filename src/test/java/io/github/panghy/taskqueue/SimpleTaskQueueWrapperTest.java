@@ -270,4 +270,72 @@ class SimpleTaskQueueWrapperTest {
     TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
     taskQueue.completeTask(claim).get();
   }
+
+  @Test
+  void testHasVisibleUnclaimedTasks() throws ExecutionException, InterruptedException {
+    // Queue should not have visible tasks initially
+    assertThat(taskQueue.hasVisibleUnclaimedTasks().get()).isFalse();
+
+    // Enqueue a task - should be immediately visible
+    taskQueue.enqueue("test-task").get();
+    assertThat(taskQueue.hasVisibleUnclaimedTasks().get()).isTrue();
+
+    // Claim the task
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+    assertThat(taskQueue.hasVisibleUnclaimedTasks().get()).isFalse(); // No unclaimed tasks
+
+    // Fail the task to make it unclaimed again
+    taskQueue.failTask(claim).get();
+    assertThat(taskQueue.hasVisibleUnclaimedTasks().get()).isTrue();
+
+    // Complete the task
+    TaskClaim<UUID, String> claim2 = taskQueue.awaitAndClaimTask().get();
+    taskQueue.completeTask(claim2).get();
+    assertThat(taskQueue.hasVisibleUnclaimedTasks().get()).isFalse();
+  }
+
+  @Test
+  void testHasVisibleUnclaimedTasksWithDelay() throws ExecutionException, InterruptedException, TimeoutException {
+    // Enqueue a task with delay - should not be immediately visible
+    database.runAsync(tr -> taskQueue.enqueue(tr, "delayed-task", Duration.ofMillis(500)))
+        .get();
+    assertThat(taskQueue.hasVisibleUnclaimedTasks().get()).isFalse();
+
+    // Wait for the task to become visible
+    Thread.sleep(1000);
+
+    // Use awaitAndClaimTask to verify task is actually visible
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    assertThat(claim).isNotNull();
+
+    // Now check hasVisibleUnclaimedTasks with a new task
+    database.runAsync(tr -> taskQueue.enqueue(tr, "task2")).get();
+    assertThat(taskQueue.hasVisibleUnclaimedTasks().get()).isTrue();
+
+    // Clean up
+    taskQueue.completeTask(claim).get();
+    TaskClaim<UUID, String> claim2 = taskQueue.awaitAndClaimTask().get();
+    taskQueue.completeTask(claim2).get();
+  }
+
+  @Test
+  void testHasVisibleUnclaimedTasksWithTransaction()
+      throws ExecutionException, InterruptedException, TimeoutException {
+    // Test hasVisibleUnclaimedTasks within a transaction
+    Boolean hasVisible =
+        database.runAsync(tr -> taskQueue.hasVisibleUnclaimedTasks(tr)).get(5, TimeUnit.SECONDS);
+    assertThat(hasVisible).isFalse();
+
+    // Add task and check again in transaction
+    database.runAsync(tr -> {
+          return taskQueue.enqueue(tr, "tx-task").thenCompose(v -> taskQueue.hasVisibleUnclaimedTasks(tr));
+        })
+        .get(5, TimeUnit.SECONDS);
+
+    assertThat(taskQueue.hasVisibleUnclaimedTasks().get()).isTrue();
+
+    // Clean up
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+    taskQueue.completeTask(claim).get();
+  }
 }
