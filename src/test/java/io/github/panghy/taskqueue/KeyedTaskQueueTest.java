@@ -8,6 +8,9 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
+import com.apple.foundationdb.tuple.Tuple;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.Timestamp;
 import io.github.panghy.taskqueue.proto.Task;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
@@ -1626,5 +1629,55 @@ public class KeyedTaskQueueTest {
       var c = queue.awaitAndClaimTask().get();
       queue.completeTask(c).get();
     }
+  }
+
+  @Test
+  void testOrphanedTaskWithNoMetadata() throws InterruptedException, ExecutionException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Manually create an orphaned task entry without metadata to simulate the error condition
+    db.runAsync(tr -> {
+          return config.getDirectory()
+              .createOrOpen(tr, List.of("unclaimed"))
+              .thenAccept(unclaimedTasks -> {
+                var taskUuid = UUID.randomUUID();
+                var taskProto = Task.newBuilder()
+                    .setTaskUuid(ByteString.copyFrom(KeyedTaskQueue.uuidToBytes(taskUuid)))
+                    .setCreationTime(Timestamp.newBuilder()
+                        .setSeconds(1)
+                        .build())
+                    .setTaskKey(ByteString.copyFromUtf8("orphaned-key"))
+                    .setTaskVersion(1)
+                    .setAttempts(0)
+                    .build();
+
+                // Create task entry without corresponding metadata - this simulates the NPE condition
+                var taskKey =
+                    unclaimedTasks.pack(Tuple.from(1000L, KeyedTaskQueue.uuidToBytes(taskUuid)));
+                tr.set(taskKey, taskProto.toByteArray());
+              });
+        })
+        .get();
+
+    // Now enqueue a valid task that should be claimable
+    queue.enqueue("valid-key", "valid-data").get();
+
+    // Set time so both tasks are visible
+    simulatedTime.set(2000);
+
+    // This should not throw NPE even though the first task has no metadata
+    // It should skip the orphaned task and claim the valid one
+    var claim = queue.awaitAndClaimTask(db).get();
+
+    // Should have claimed the valid task, not the orphaned one
+    assertThat(claim).isNotNull();
+    assertThat(claim.taskKey()).isEqualTo("valid-key");
+    assertThat(claim.task()).isEqualTo("valid-data");
+
+    // Complete the valid task
+    claim.complete().get();
+
+    // Queue should now be empty (orphaned task was cleaned up, valid task was completed)
+    assertThat(queue.isEmpty().get()).isTrue();
   }
 }
