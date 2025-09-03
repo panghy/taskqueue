@@ -61,4 +61,9 @@ public class SimpleTaskQueueWrapper<T> implements SimpleTaskQueue<T> {
   public CompletableFuture<Boolean> isEmpty(Transaction tr) {
     return taskQueue.isEmpty(tr);
   }
+
+  @Override
+  public CompletableFuture<Boolean> hasVisibleUnclaimedTasks(Transaction tr) {
+    return taskQueue.hasVisibleUnclaimedTasks(tr);
+  }
 }

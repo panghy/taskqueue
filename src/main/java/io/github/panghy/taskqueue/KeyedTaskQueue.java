@@ -1026,4 +1026,16 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         tr.getRange(claimedTasks.range(), 1).asList().thenApply(List::isEmpty);
     return unclaimedEmpty.thenCombine(claimedEmpty, (u, c) -> u && c);
   }
+
+  @Override
+  public CompletableFuture<Boolean> hasVisibleUnclaimedTasks(Transaction tr) {
+    Instant now = config.getInstantSource().instant();
+    // Get range of tasks with visibility time <= now
+    // Since tasks are ordered by timestamp, we can use a range query
+    byte[] endKey = unclaimedTasks.pack(Tuple.from(now.toEpochMilli() + 1));
+    return tr.snapshot()
+        .getRange(unclaimedTasks.range().begin, endKey, 1)
+        .asList()
+        .thenApply(kvs -> !kvs.isEmpty());
+  }
 }

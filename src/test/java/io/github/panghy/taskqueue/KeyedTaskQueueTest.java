@@ -1551,4 +1551,80 @@ public class KeyedTaskQueueTest {
     queue.completeTask(claim2).get();
     assertThat(queue.isEmpty().get()).isTrue(); // Now empty
   }
+
+  @Test
+  void testHasVisibleUnclaimedTasks() throws InterruptedException, ExecutionException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Queue should not have visible tasks initially
+    assertThat(queue.hasVisibleUnclaimedTasks().get()).isFalse();
+
+    // Enqueue a task with no delay - should be immediately visible
+    queue.enqueue("key1", "data1").get();
+    assertThat(queue.hasVisibleUnclaimedTasks().get()).isTrue();
+
+    // Claim the task
+    var claim = queue.awaitAndClaimTask().get();
+    assertThat(queue.hasVisibleUnclaimedTasks().get()).isFalse(); // No unclaimed tasks
+
+    // Fail the task to make it unclaimed again
+    queue.failTask(claim).get();
+    assertThat(queue.hasVisibleUnclaimedTasks().get()).isTrue();
+
+    // Complete the task
+    var claim2 = queue.awaitAndClaimTask().get();
+    queue.completeTask(claim2).get();
+    assertThat(queue.hasVisibleUnclaimedTasks().get()).isFalse();
+  }
+
+  @Test
+  void testHasVisibleUnclaimedTasksWithDelay() throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Set initial time
+    simulatedTime.set(1000);
+
+    // Enqueue a task with delay - should not be immediately visible
+    db.runAsync(tr -> queue.enqueue(tr, "key1", "data1", Duration.ofSeconds(2)))
+        .get();
+    assertThat(queue.hasVisibleUnclaimedTasks().get()).isFalse();
+
+    // Advance simulated time to make task visible
+    simulatedTime.set(3000);
+    assertThat(queue.hasVisibleUnclaimedTasks().get()).isTrue();
+
+    // Clean up
+    var claim = queue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    queue.completeTask(claim).get();
+  }
+
+  @Test
+  void testHasVisibleUnclaimedTasksMixedVisibility() throws InterruptedException, ExecutionException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue tasks with different delays
+    db.runAsync(tr -> queue.enqueue(tr, "key1", "data1", Duration.ofSeconds(10)))
+        .get(); // Not visible
+    db.runAsync(tr -> queue.enqueue(tr, "key2", "data2", Duration.ZERO)).get(); // Visible
+    db.runAsync(tr -> queue.enqueue(tr, "key3", "data3", Duration.ofSeconds(5)))
+        .get(); // Not visible
+
+    // Should return true because of the immediately visible task
+    assertThat(queue.hasVisibleUnclaimedTasks().get()).isTrue();
+
+    // Claim the visible task
+    var claim = queue.awaitAndClaimTask().get();
+    assertThat(claim.taskKey()).isEqualTo("key2");
+    queue.completeTask(claim).get();
+
+    // Now no visible tasks
+    assertThat(queue.hasVisibleUnclaimedTasks().get()).isFalse();
+
+    // Clean up remaining tasks after they become visible
+    Thread.sleep(10500);
+    while (queue.hasVisibleUnclaimedTasks().get()) {
+      var c = queue.awaitAndClaimTask().get();
+      queue.completeTask(c).get();
+    }
+  }
 }
