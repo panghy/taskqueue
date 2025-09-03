@@ -1674,8 +1674,7 @@ public class KeyedTaskQueueTest {
     // Complete the valid task
     claim.complete().get();
 
-    // The orphaned task is still there but can't be claimed because it has no metadata
-    // isEmpty will return false because it just checks for existence of tasks
+    // Orphaned task cleanup now properly removes the task key, so isEmpty() returns true as expected
     assertThat(queue.isEmpty().get()).isTrue();
   }
 }
