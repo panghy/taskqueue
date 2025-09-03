@@ -1639,7 +1639,7 @@ public class KeyedTaskQueueTest {
     db.runAsync(tr -> config.getDirectory()
             .createOrOpen(tr, List.of("unclaimed_tasks"))
             .thenAccept(unclaimedTasks -> {
-              // lowest possible uuid so it alwasy comes first.
+              // lowest possible uuid so it always comes first.
               var taskUuid = UUID.fromString("00000000-0000-0000-0000-000000000000");
               var taskProto = Task.newBuilder()
                   .setTaskUuid(ByteString.copyFrom(KeyedTaskQueue.uuidToBytes(taskUuid)))
