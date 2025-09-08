@@ -200,6 +200,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     if (delay.isNegative() || ttl.isNegative()) {
       throw new IllegalArgumentException("delay and ttl cannot be negative");
     }
+    if (ttl.isZero()) {
+      throw new IllegalArgumentException("ttl cannot be zero");
+    }
     // Start a span for enqueue operation
     Span span = tracer.spanBuilder("taskqueue.enqueue")
         .setSpanKind(SpanKind.PRODUCER)
@@ -219,6 +222,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     // task keys allow for at-most-one task per taskKey semantics.
     ByteString taskKeyBytes = config.getKeySerializer().serialize(taskKey);
     byte[] taskKeyB = taskKeyBytes.toByteArray();
+    if (taskKeyB.length == 0) {
+      throw new IllegalArgumentException("taskKey cannot be serialized to an empty byte array");
+    }
     byte[] metadataKeyB = taskKeys.pack(Tuple.from(taskKeyB, METADATA_KEY));
     // probe metadata to see if we have seen this task key before.
     var metadataDataF = getTaskMetadataAsync(tr, taskKeyBytes);
@@ -255,7 +261,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
       return null;
     });
     return taskF.thenApply(v -> {
-          LOGGER.info("Enqueued task: " + describeTask(taskUuid, task));
+          LOGGER.debug("Enqueued task: {}", describeTask(taskUuid, task));
           TaskKeyMetadata result = setMetadataF.join();
 
           // Record metrics
@@ -421,7 +427,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           tr.clear(claimedTasks.pack(Tuple.from(currentExpiration.toEpochMilli(), taskUuid)));
           byte[] taskKeyB = taskKeyBytes.toByteArray();
           if (taskClaim.taskProto().getTaskVersion() == taskMetadataProto.getHighestVersionSeen()) {
-            LOGGER.info("Completing task: " + describeTask(taskUuid, taskClaim.task()));
+            LOGGER.debug("Completing task: {}", describeTask(taskUuid, taskClaim.task()));
             // remove all versions of the task (+ metadata).
             tr.clear(Range.startsWith(taskKeys.pack(taskKeyB)));
             return completedFuture(null);
@@ -429,7 +435,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             // another version of the task needs to be scheduled.
             var taskKeyF = getTaskKeyAsync(tr, taskKeyBytes, taskMetadataProto.getHighestVersionSeen());
             return taskKeyF.thenApply(taskKeyProto -> {
-              LOGGER.info(
+              LOGGER.debug(
                   "Scheduling next version of task {}: version {} -> {}",
                   describeTask(taskUuid, taskClaim.task()),
                   taskClaim.taskProto().getTaskVersion(),
@@ -541,8 +547,10 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             byte[] taskKeyB = taskKeyBytes.toByteArray();
             storeTaskMetadata(tr, taskKeyB, updatedMetadata);
 
-            LOGGER.info("Extended TTL for task: " + describeTask(taskUuid, taskClaim.task()) + " to "
-                + newExpiration);
+            LOGGER.debug(
+                "Extended TTL for task: {} to {}",
+                describeTask(taskUuid, taskClaim.task()),
+                newExpiration);
           } else {
             // This should never happen - a worker with an active claim found metadata with no current claim
             throw new TaskQueueException("Task " + describeTask(taskUuid, taskClaim.task())
@@ -580,7 +588,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     ByteString taskKeyBytes = taskClaim.taskProto().getTaskKey();
     var taskMetadataF = getTaskMetadataAsync(tr, taskKeyBytes);
     UUID taskUuid = bytesToUuid(taskClaim.taskProto().getTaskUuid().toByteArray());
-    LOGGER.info("Failing task: " + describeTask(taskUuid, taskClaim.task()));
+    LOGGER.debug("Failing task: {}", describeTask(taskUuid, taskClaim.task()));
     return taskMetadataF
         .thenCompose(taskMetadataProto -> {
           if (taskMetadataProto == null) {
@@ -609,15 +617,17 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             // we are the latest version, fail the task.
             if (taskClaim.taskProto().getAttempts() >= config.getMaxAttempts()) {
               // we have reached the max attempts, clear the task.
-              LOGGER.info(
-                  "Task " + describeTask(taskUuid, taskClaim.task()) + " has reached max attempts: "
-                      + taskClaim.taskProto().getAttempts() + ". Skipping.");
+              LOGGER.warn(
+                  "Task {} has reached max attempts: {}. Skipping.",
+                  describeTask(taskUuid, taskClaim.task()),
+                  taskClaim.taskProto().getAttempts());
               // clear all versions of the task (+ metadata).
               tr.clear(Range.startsWith(taskKeys.pack(taskKeyB)));
             } else {
-              LOGGER.info("Failing task: " + describeTask(taskUuid, taskClaim.task()) + " with "
-                  + taskClaim.taskProto().getAttempts()
-                  + " attempts. Rescheduling for future execution.");
+              LOGGER.debug(
+                  "Failing task: {} with {} attempts. Rescheduling for future execution.",
+                  describeTask(taskUuid, taskClaim.task()),
+                  taskClaim.taskProto().getAttempts());
               var updatedTaskProto = taskClaim.taskProto().toBuilder()
                   .clearClaim()
                   .build();
@@ -632,9 +642,11 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             return completedFuture(null);
           } else {
             // we are not the latest version, fail the task and schedule the latest version.
-            LOGGER.info("Task " + describeTask(taskUuid, taskClaim.task()) + " is not the latest version: "
-                + taskClaim.taskProto().getTaskVersion()
-                + " != " + taskMetadataProto.getHighestVersionSeen() + ". Skipping to latest version.");
+            LOGGER.info(
+                "Task {} is not the latest version: {} != {}. Skipping to latest version.",
+                describeTask(taskUuid, taskClaim.task()),
+                taskClaim.taskProto().getTaskVersion(),
+                taskMetadataProto.getHighestVersionSeen());
             var latestTaskKeyF =
                 getTaskKeyAsync(tr, taskKeyBytes, taskMetadataProto.getHighestVersionSeen());
             return latestTaskKeyF.thenApply(latestTaskKey -> {
@@ -719,19 +731,21 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         }
         T taskObj = config.getTaskSerializer().deserialize(taskKeyProto.getTask());
         UUID taskUuid = bytesToUuid(taskProto.getTaskUuid().toByteArray());
-        LOGGER.info("Found unclaimed task: " + describeTask(taskUuid, taskObj));
+        LOGGER.debug("Found unclaimed task: {}", describeTask(taskUuid, taskObj));
         UUID claimUuid = UUID.randomUUID();
         ByteString claimUuidBytes = ByteString.copyFrom(uuidToBytes(claimUuid));
         long attempts = taskProto.getAttempts();
         if (taskProto.getAttempts() >= config.getMaxAttempts()) {
-          LOGGER.info("Task " + describeTask(taskUuid, taskObj) + " has reached max attempts: " + attempts);
+          LOGGER.warn("Task {} has reached max attempts: {}", describeTask(taskUuid, taskObj), attempts);
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKey.toByteArray(), taskProto.getTaskVersion())));
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
-          LOGGER.info("Task " + describeTask(taskUuid, taskObj) + " is not the latest version: "
-              + taskProto.getTaskVersion()
-              + " != " + taskKeyMetadataProto.getHighestVersionSeen() + ". Skipping to latest version.");
+          LOGGER.warn(
+              "Task {} is not the latest version: {} != {}. Skipping to latest version.",
+              describeTask(taskUuid, taskObj),
+              taskProto.getTaskVersion(),
+              taskKeyMetadataProto.getHighestVersionSeen());
           attempts = 0;
         }
         attempts++;
@@ -754,7 +768,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         storeClaimedTask(tr, deadline, taskUuid, updatedTaskProto);
         byte[] taskKeyB = taskKey.toByteArray();
         storeTaskMetadata(tr, taskKeyB, updatedTaskKeyMetadataProto);
-        LOGGER.info("Claiming task: " + describeTask(taskUuid, taskObj) + " with claim: " + claimUuid);
+        LOGGER.debug("Claiming task: {} with claim: {}", describeTask(taskUuid, taskObj), claimUuid);
         return Optional.of(TaskClaim.<K, T>builder()
             .taskProto(updatedTaskProto)
             .taskKeyProto(taskKeyProto)
@@ -848,20 +862,22 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         }
         T taskObj = config.getTaskSerializer().deserialize(latestTaskKey.getTask());
         UUID taskUuid = bytesToUuid(taskProto.getTaskUuid().toByteArray());
-        LOGGER.info("Found expired claimed task: " + describeTask(taskUuid, taskObj));
+        LOGGER.debug("Found expired claimed task: {}", describeTask(taskUuid, taskObj));
         // reclaim the task using a new claim UUID.
         UUID claimUuid = UUID.randomUUID();
         ByteString claimUuidBytes = ByteString.copyFrom(uuidToBytes(claimUuid));
         long attempts = taskProto.getAttempts();
         if (taskProto.getAttempts() >= config.getMaxAttempts()) {
-          LOGGER.info("Task " + describeTask(taskUuid, taskObj) + " has reached max attempts: " + attempts);
+          LOGGER.warn("Task {} has reached max attempts: {}", describeTask(taskUuid, taskObj), attempts);
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), taskProto.getTaskVersion())));
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
-          LOGGER.info("Task " + describeTask(taskUuid, taskObj) + " is not the latest version: "
-              + taskProto.getTaskVersion()
-              + " != " + taskKeyMetadataProto.getHighestVersionSeen() + ". Skipping to latest version.");
+          LOGGER.warn(
+              "Task {} is not the latest version: {} != {}. Skipping to latest version.",
+              describeTask(taskUuid, taskObj),
+              taskProto.getTaskVersion(),
+              taskKeyMetadataProto.getHighestVersionSeen());
           attempts = 0;
         }
         attempts++;
@@ -879,8 +895,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             .build();
         byte[] taskKeyB = taskKeyBytes.toByteArray();
         storeTaskMetadata(tr, taskKeyB, updatedTaskKeyMetadataProto);
-        tr.set(taskKV.getKey(), updatedTaskProto.toByteArray());
-        LOGGER.info("Reclaiming task: " + describeTask(taskUuid, taskObj) + " with claim: " + claimUuid);
+        tr.clear(taskKV.getKey());
+        storeClaimedTask(tr, deadline, taskUuid, updatedTaskProto);
+        LOGGER.debug("Reclaiming task: {} with claim: {}", describeTask(taskUuid, taskObj), claimUuid);
         return Optional.of(TaskClaim.<K, T>builder()
             .taskProto(updatedTaskProto)
             .taskKeyProto(latestTaskKey)
@@ -1064,5 +1081,13 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .getRange(unclaimedTasks.range().begin, endKey, 1)
         .asList()
         .thenApply(kvs -> !kvs.isEmpty());
+  }
+
+  @Override
+  public CompletableFuture<Boolean> hasClaimedTasks(Transaction tr) {
+    return tr.getRange(claimedTasks.range(), 1).asList().thenApply(kvs -> {
+      LOGGER.debug("hasClaimedTasks: {}", !kvs.isEmpty());
+      return !kvs.isEmpty();
+    });
   }
 }

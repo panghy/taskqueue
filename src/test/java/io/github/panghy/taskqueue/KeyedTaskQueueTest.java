@@ -1677,4 +1677,147 @@ public class KeyedTaskQueueTest {
     // Orphaned task cleanup now properly removes the task key, so isEmpty() returns true as expected
     assertThat(queue.isEmpty().get()).isTrue();
   }
+
+  @Test
+  void testHasClaimedTasks() throws InterruptedException, ExecutionException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Initially no claimed tasks
+    assertThat(queue.hasClaimedTasks().get()).isFalse();
+
+    // Enqueue a task
+    queue.enqueue("key1", "data1").get();
+
+    // Still no claimed tasks (task is unclaimed)
+    assertThat(queue.hasClaimedTasks().get()).isFalse();
+
+    // Claim the task
+    var claim1 = queue.awaitAndClaimTask().get();
+
+    // Now we have a claimed task
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Enqueue and claim another task
+    queue.enqueue("key2", "data2").get();
+    var claim2 = queue.awaitAndClaimTask().get();
+
+    // Still have claimed tasks
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Complete one task
+    queue.completeTask(claim1).get();
+
+    // Still have one claimed task
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Complete the second task
+    queue.completeTask(claim2).get();
+
+    // No more claimed tasks
+    assertThat(queue.hasClaimedTasks().get()).isFalse();
+  }
+
+  @Test
+  void testHasClaimedTasksWithFailedTask() throws InterruptedException, ExecutionException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim a task
+    queue.enqueue("key1", "data1").get();
+    var claim = queue.awaitAndClaimTask().get();
+
+    // Has claimed task
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Fail the task (moves it back to unclaimed)
+    queue.failTask(claim).get();
+
+    // No claimed tasks after failure
+    assertThat(queue.hasClaimedTasks().get()).isFalse();
+
+    // Clean up
+    var claim2 = queue.awaitAndClaimTask().get();
+    queue.completeTask(claim2).get();
+  }
+
+  @Test
+  void testHasClaimedTasksWithExpiredTask() throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Set initial time
+    simulatedTime.set(1000);
+
+    // Enqueue a task with short TTL
+    db.runAsync(tr -> queue.enqueue(tr, "key1", "data1", Duration.ZERO, Duration.ofSeconds(2)))
+        .get();
+
+    // Claim the task
+    var claim = queue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+
+    // Has claimed task
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Advance time beyond TTL to expire the claim
+    simulatedTime.set(5000);
+
+    // Task is still in claimed space even though it's expired
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Reclaim the expired task
+    var claim2 = queue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+
+    // Still has claimed task (it was reclaimed)
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Complete the task
+    queue.completeTask(claim2).get();
+
+    // No more claimed tasks
+    assertThat(queue.hasClaimedTasks().get()).isFalse();
+  }
+
+  @Test
+  void testReclaimExpiredTaskProperlyMovesItInClaimedSpace()
+      throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Set initial time
+    simulatedTime.set(1000);
+
+    // Enqueue a task with short TTL (2 seconds)
+    db.runAsync(tr -> queue.enqueue(tr, "key1", "data1", Duration.ZERO, Duration.ofSeconds(2)))
+        .get();
+
+    // Claim the task - it will be stored with expiration at time 3000 (1000 + 2000)
+    var claim1 = queue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+
+    // Verify we have exactly one claimed task
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Advance time beyond TTL to expire the claim (to time 4000)
+    simulatedTime.set(4000);
+
+    // The task is still in claimed space at the old expiration slot (3000)
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Reclaim the expired task - this should:
+    // 1. Remove it from the old expiration slot (3000)
+    // 2. Add it to a new expiration slot (6000 = 4000 + 2000)
+    var claim2 = queue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+
+    // Should still have exactly one claimed task (not two!)
+    assertThat(queue.hasClaimedTasks().get()).isTrue();
+
+    // Verify it's the same task that was reclaimed
+    assertThat(claim2.taskKey()).isEqualTo("key1");
+    assertThat(claim2.task()).isEqualTo("data1");
+
+    // Complete the task to clean up
+    queue.completeTask(claim2).get();
+
+    // Verify no claimed tasks remain
+    assertThat(queue.hasClaimedTasks().get()).isFalse();
+
+    // Also verify the queue is completely empty
+    assertThat(queue.isEmpty().get()).isTrue();
+  }
 }
