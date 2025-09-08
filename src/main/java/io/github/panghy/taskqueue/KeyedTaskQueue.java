@@ -430,6 +430,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             LOGGER.debug("Completing task: {}", describeTask(taskUuid, taskClaim.task()));
             // remove all versions of the task (+ metadata).
             tr.clear(Range.startsWith(taskKeys.pack(taskKeyB)));
+            // Notify awaitQueueEmpty watchers
+            incrementWatchKey(tr);
             return completedFuture(null);
           } else {
             // another version of the task needs to be scheduled.
@@ -1089,5 +1091,83 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
       LOGGER.debug("hasClaimedTasks: {}", !kvs.isEmpty());
       return !kvs.isEmpty();
     });
+  }
+
+  @Override
+  public CompletableFuture<Void> awaitQueueEmpty(Database db) {
+    Span span = tracer.spanBuilder("taskqueue.awaitQueueEmpty")
+        .setSpanKind(SpanKind.CONSUMER)
+        .setAttribute(QUEUE_PATH, queuePath)
+        .startSpan();
+
+    return AsyncUtil.whileTrue(
+            () -> {
+              var watchFF = db.runAsync(tr -> {
+                // Check if both unclaimed and claimed queues are empty
+                var unclaimedEmptyF = tr.getRange(unclaimedTasks.range(), 1)
+                    .asList()
+                    .thenApply(List::isEmpty);
+                var claimedEmptyF = tr.getRange(claimedTasks.range(), 1)
+                    .asList()
+                    .thenApply(List::isEmpty);
+
+                return allOf(unclaimedEmptyF, claimedEmptyF).thenCompose(v -> {
+                  boolean unclaimedEmpty = unclaimedEmptyF.join();
+                  boolean claimedEmpty = claimedEmptyF.join();
+
+                  if (unclaimedEmpty && claimedEmpty) {
+                    // Queue is empty, we're done
+                    return completedFuture(null);
+                  }
+
+                  // Queue is not empty, set up a watch
+                  return completedFuture(tr.watch(watchKey));
+                });
+              });
+
+              // Wait for the watch to trigger or check periodically for expired tasks
+              return watchFF.thenCompose(watchF -> {
+                if (watchF == null) {
+                  // Queue is empty
+                  return completedFuture(false);
+                }
+
+                // Find the next expiration time for claimed tasks (in case they expire and queue
+                // becomes empty)
+                var nextExpirationOF = db.runAsync(tr -> findNextExpiration(tr, claimedTasks));
+
+                return nextExpirationOF.thenCompose(nextExpirationO -> {
+                  if (nextExpirationO.isPresent()) {
+                    long sleepTime = nextExpirationO.get().toEpochMilli()
+                        - config.getInstantSource()
+                            .instant()
+                            .toEpochMilli();
+                    if (sleepTime > 0) {
+                      // Wait for either the watch to trigger or the next expiration
+                      return watchF.orTimeout(sleepTime, TimeUnit.MILLISECONDS)
+                          .exceptionally($ -> null)
+                          .thenApply($ -> true);
+                    }
+                    // Expiration has already passed, cancel watch and check again
+                    watchF.cancel(true);
+                    return completedFuture(true);
+                  }
+                  // No expiration time, just wait for the watch
+                  return watchF.thenApply($ -> true);
+                });
+              });
+            },
+            db.getExecutor())
+        .handle((result, error) -> {
+          if (error != null) {
+            span.recordException(error)
+                .setStatus(StatusCode.ERROR, error.getMessage())
+                .end();
+            throw new CompletionException(error);
+          } else {
+            span.addEvent("Queue is empty").setStatus(StatusCode.OK).end();
+            return null;
+          }
+        });
   }
 }

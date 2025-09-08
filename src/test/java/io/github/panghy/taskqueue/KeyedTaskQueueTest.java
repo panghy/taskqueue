@@ -1820,4 +1820,173 @@ public class KeyedTaskQueueTest {
     // Also verify the queue is completely empty
     assertThat(queue.isEmpty().get()).isTrue();
   }
+
+  @Test
+  void testAwaitQueueEmptyWithEmptyQueue() throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Queue is initially empty, should complete immediately
+    var emptyFuture = queue.awaitQueueEmpty();
+    emptyFuture.get(1, TimeUnit.SECONDS);
+
+    // Verify it completes
+    assertThat(emptyFuture.isDone()).isTrue();
+  }
+
+  @Test
+  void testAwaitQueueEmptyWithUnclaimedTasks() throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue a task (it's unclaimed)
+    queue.enqueue("key1", "data1").get();
+
+    // awaitQueueEmpty should not complete immediately
+    var emptyFuture = queue.awaitQueueEmpty();
+    assertThat(emptyFuture.isDone()).isFalse();
+
+    // Claim and complete the task
+    var claim = queue.awaitAndClaimTask().get();
+    queue.completeTask(claim).get();
+
+    // Now the queue should be empty
+    emptyFuture.get(5, TimeUnit.SECONDS);
+    assertThat(emptyFuture.isDone()).isTrue();
+  }
+
+  @Test
+  void testAwaitQueueEmptyWithClaimedTasks() throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim a task
+    queue.enqueue("key1", "data1").get();
+    var claim = queue.awaitAndClaimTask().get();
+
+    // awaitQueueEmpty should not complete while task is claimed
+    var emptyFuture = queue.awaitQueueEmpty();
+    assertThat(emptyFuture.isDone()).isFalse();
+
+    // Complete the task
+    queue.completeTask(claim).get();
+
+    // Now the queue should be empty
+    emptyFuture.get(5, TimeUnit.SECONDS);
+    assertThat(emptyFuture.isDone()).isTrue();
+  }
+
+  @Test
+  void testAwaitQueueEmptyWithMultipleTasks() throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue multiple tasks
+    queue.enqueue("key1", "data1").get();
+    queue.enqueue("key2", "data2").get();
+    queue.enqueue("key3", "data3").get();
+
+    // Start waiting for empty
+    var emptyFuture = queue.awaitQueueEmpty();
+    assertThat(emptyFuture.isDone()).isFalse();
+
+    // Claim and complete all tasks
+    var claim1 = queue.awaitAndClaimTask().get();
+    var claim2 = queue.awaitAndClaimTask().get();
+    var claim3 = queue.awaitAndClaimTask().get();
+
+    // Complete them one by one
+    queue.completeTask(claim1).get();
+    assertThat(emptyFuture.isDone()).isFalse(); // Still have 2 claimed tasks
+
+    queue.completeTask(claim2).get();
+    assertThat(emptyFuture.isDone()).isFalse(); // Still have 1 claimed task
+
+    queue.completeTask(claim3).get();
+
+    // Now should be empty
+    emptyFuture.get(5, TimeUnit.SECONDS);
+    assertThat(emptyFuture.isDone()).isTrue();
+  }
+
+  @Test
+  void testAwaitQueueEmptyWithFailedTask() throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Enqueue and claim a task
+    queue.enqueue("key1", "data1").get();
+    var claim = queue.awaitAndClaimTask().get();
+
+    // Start waiting for empty
+    var emptyFuture = queue.awaitQueueEmpty();
+    assertThat(emptyFuture.isDone()).isFalse();
+
+    // Fail the task (moves it back to unclaimed)
+    queue.failTask(claim).get();
+
+    // Queue still not empty (task is unclaimed now)
+    assertThat(emptyFuture.isDone()).isFalse();
+
+    // Claim and complete the task
+    var claim2 = queue.awaitAndClaimTask().get();
+    queue.completeTask(claim2).get();
+
+    // Now should be empty
+    emptyFuture.get(5, TimeUnit.SECONDS);
+    assertThat(emptyFuture.isDone()).isTrue();
+  }
+
+  @Test
+  void testAwaitQueueEmptyWithExpiredTask() throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Set initial time
+    simulatedTime.set(1000);
+
+    // Enqueue a task with short TTL
+    db.runAsync(tr -> queue.enqueue(tr, "key1", "data1", Duration.ZERO, Duration.ofMillis(100)))
+        .get();
+    var claim = queue.awaitAndClaimTask().get();
+
+    // Start waiting for empty
+    var emptyFuture = queue.awaitQueueEmpty();
+    assertThat(emptyFuture.isDone()).isFalse();
+
+    // Advance time so the task expires
+    simulatedTime.set(1200);
+
+    // Reclaim the expired task
+    var claim2 = queue.awaitAndClaimTask().get();
+    assertThat(claim2.taskKey()).isEqualTo("key1");
+
+    // Complete the task
+    queue.completeTask(claim2).get();
+
+    // Now should be empty
+    emptyFuture.get(5, TimeUnit.SECONDS);
+    assertThat(emptyFuture.isDone()).isTrue();
+  }
+
+  @Test
+  void testAwaitQueueEmptyWithDelayedTask() throws InterruptedException, ExecutionException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Set initial time
+    simulatedTime.set(1000);
+
+    // Enqueue a task with delay (not visible yet)
+    db.runAsync(tr -> queue.enqueue(tr, "key1", "data1", Duration.ofMillis(500), Duration.ofSeconds(10)))
+        .get();
+
+    // Start waiting for empty - should not complete yet because task exists (even if not visible)
+    var emptyFuture = queue.awaitQueueEmpty();
+    assertThat(emptyFuture.isDone()).isFalse();
+
+    // Advance time so the task becomes visible
+    simulatedTime.set(1600);
+
+    // Claim and complete the task
+    var claim = queue.awaitAndClaimTask().get();
+    queue.completeTask(claim).get();
+
+    // Now should be empty
+    emptyFuture.get(5, TimeUnit.SECONDS);
+    assertThat(emptyFuture.isDone()).isTrue();
+  }
 }

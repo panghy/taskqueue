@@ -71,4 +71,9 @@ public class SimpleTaskQueueWrapper<T> implements SimpleTaskQueue<T> {
   public CompletableFuture<Boolean> hasClaimedTasks(Transaction tr) {
     return taskQueue.hasClaimedTasks(tr);
   }
+
+  @Override
+  public CompletableFuture<Void> awaitQueueEmpty(Database db) {
+    return taskQueue.awaitQueueEmpty(db);
+  }
 }

@@ -216,4 +216,26 @@ public interface SimpleTaskQueue<T> {
    * @return A future that completes with true if there are claimed tasks, false otherwise.
    */
   CompletableFuture<Boolean> hasClaimedTasks(Transaction tr);
+
+  /**
+   * Waits for the queue to become completely empty (no unclaimed or claimed tasks).
+   * This method returns a future that completes when there are no tasks in the queue.
+   * It uses a watch similar to awaitAndClaimTask to be notified when the queue state changes.
+   *
+   * @return A future that completes when the queue is empty.
+   */
+  default CompletableFuture<Void> awaitQueueEmpty() {
+    return awaitQueueEmpty(getConfig().getDatabase());
+  }
+
+  /**
+   * Waits for the queue to become completely empty (no unclaimed or claimed tasks).
+   * This method returns a future that completes when there are no tasks in the queue.
+   * It uses a watch similar to awaitAndClaimTask to be notified when the queue state changes.
+   *
+   * @param db The database to use for the operation. This must be the actual database and not a transaction as we
+   *           need to use a transaction to watch a key.
+   * @return A future that completes when the queue is empty.
+   */
+  CompletableFuture<Void> awaitQueueEmpty(Database db);
 }
