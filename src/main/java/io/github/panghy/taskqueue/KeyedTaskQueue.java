@@ -333,8 +333,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                             .exceptionally($ -> null)
                             .thenApply($ -> true);
                       }
-                      return watchF.thenApply($ -> true)
-                          .whenComplete((r, t) -> watchF.cancel(true));
+                      watchF.cancel(true);
+                      return completedFuture(true);
                     }
                     return watchF.thenApply($ -> true);
                   });
