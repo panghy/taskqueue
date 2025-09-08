@@ -197,4 +197,23 @@ public interface SimpleTaskQueue<T> {
    * @return A future that completes with true if there are visible unclaimed tasks, false otherwise.
    */
   CompletableFuture<Boolean> hasVisibleUnclaimedTasks(Transaction tr);
+
+  /**
+   * Checks whether the queue has any claimed tasks.
+   * This returns true if there are any tasks that are currently being processed by workers.
+   *
+   * @return A future that completes with true if there are claimed tasks, false otherwise.
+   */
+  default CompletableFuture<Boolean> hasClaimedTasks() {
+    return runAsync(this::hasClaimedTasks);
+  }
+
+  /**
+   * Checks whether the queue has any claimed tasks.
+   * This returns true if there are any tasks that are currently being processed by workers.
+   *
+   * @param tr The transaction to use for the operation.
+   * @return A future that completes with true if there are claimed tasks, false otherwise.
+   */
+  CompletableFuture<Boolean> hasClaimedTasks(Transaction tr);
 }
