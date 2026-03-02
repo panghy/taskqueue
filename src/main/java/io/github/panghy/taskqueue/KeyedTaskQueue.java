@@ -36,10 +36,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
@@ -93,6 +95,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   // Graceful shutdown support
   private volatile boolean closed = false;
   private final CompletableFuture<Void> closeFuture = new CompletableFuture<>();
+  private final Set<CompletableFuture<Void>> activeWatches = ConcurrentHashMap.newKeySet();
 
   /**
    * Private constructor. Use {@link #createOrOpen(TaskQueueConfig, TransactionContext)} to create an instance.
@@ -194,6 +197,10 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   public void close() {
     closed = true;
     closeFuture.completeExceptionally(new TaskQueueException("Queue is closed"));
+    for (CompletableFuture<Void> watch : activeWatches) {
+      watch.completeExceptionally(new TaskQueueException("Queue is closed"));
+    }
+    activeWatches.clear();
   }
 
   private void checkNotClosed() {
@@ -216,12 +223,13 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         raced.complete(v);
       }
     });
-    closeFuture.whenComplete((v, ex) -> {
-      if (ex != null) {
-        raced.completeExceptionally(ex);
-        watchF.cancel(true);
-      }
-    });
+    activeWatches.add(raced);
+    raced.whenComplete((v, ex) -> activeWatches.remove(raced));
+    // If already closed, complete immediately
+    if (closed) {
+      raced.completeExceptionally(new TaskQueueException("Queue is closed"));
+      watchF.cancel(true);
+    }
     return raced;
   }
 

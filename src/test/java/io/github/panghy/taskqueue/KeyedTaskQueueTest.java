@@ -2034,9 +2034,6 @@ public class KeyedTaskQueueTest {
     var claimFuture = queue.awaitAndClaimTask(db);
     assertThat(claimFuture.isDone()).isFalse();
 
-    // Give the watch a moment to be set up
-    Thread.sleep(200);
-
     // Close the queue
     queue.close();
 
@@ -2058,9 +2055,6 @@ public class KeyedTaskQueueTest {
     var emptyFuture = queue.awaitQueueEmpty(db);
     assertThat(emptyFuture.isDone()).isFalse();
 
-    // Give the watch a moment to be set up
-    Thread.sleep(200);
-
     // Close the queue
     queue.close();
 
@@ -2081,9 +2075,6 @@ public class KeyedTaskQueueTest {
     // Start waiting for a task
     var claimFuture = simpleQueue.awaitAndClaimTask(db);
     assertThat(claimFuture.isDone()).isFalse();
-
-    // Give the watch a moment to be set up
-    Thread.sleep(200);
 
     // Close the simple queue (should delegate to wrapped queue)
     simpleQueue.close();
@@ -2222,8 +2213,11 @@ public class KeyedTaskQueueTest {
     // Now the task should be exhausted during the next reclaim attempt.
     // awaitAndClaimTask will find the expired task, see max attempts reached, and exhaust it.
     var taskClaimF = queue.awaitAndClaimTask(db);
-    // Give it time to process the expired task
-    Thread.sleep(200);
+    // Wait for async processing to complete
+    long deadline = System.currentTimeMillis() + 5000;
+    while ((expiredEvents.size() < 2 || exhaustedEvents.size() < 1) && System.currentTimeMillis() < deadline) {
+      Thread.sleep(50);
+    }
 
     // Verify expired was called twice and exhausted once
     assertThat(expiredEvents).hasSize(2);
