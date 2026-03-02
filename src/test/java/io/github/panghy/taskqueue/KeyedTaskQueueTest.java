@@ -11,6 +11,7 @@ import com.apple.foundationdb.directory.DirectorySubspace;
 import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Timestamp;
+import io.github.panghy.taskqueue.proto.DeadLetteredTask;
 import io.github.panghy.taskqueue.proto.Task;
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
@@ -1988,5 +1989,286 @@ public class KeyedTaskQueueTest {
     // Now should be empty
     emptyFuture.get(5, TimeUnit.SECONDS);
     assertThat(emptyFuture.isDone()).isTrue();
+  }
+
+  // ---- Dead Letter Queue (DLQ) Tests ----
+
+  @Test
+  void testDlqDisabledByDefault_tasksDroppedAfterMaxAttempts()
+      throws ExecutionException, InterruptedException, TimeoutException {
+    // DLQ is disabled by default - tasks should be dropped after max attempts
+    var limitedConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(2)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(limitedConfig, db).get();
+
+    queue.enqueue("drop-me", "task-data").get(5, TimeUnit.SECONDS);
+
+    // First attempt - fail
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim1.taskProto().getAttempts()).isEqualTo(1);
+    claim1.fail();
+
+    // Second attempt - fail again (max attempts reached)
+    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim2.taskProto().getAttempts()).isEqualTo(2);
+    claim2.fail().get(5, TimeUnit.SECONDS);
+
+    // Task should be dropped, not in DLQ
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+  }
+
+  @Test
+  void testDlqEnabled_tasksMoveToDlqAfterMaxAttempts()
+      throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(2)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    queue.enqueue("dlq-task", "dlq-data").get(5, TimeUnit.SECONDS);
+
+    // First attempt - fail
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    claim1.fail();
+
+    // Second attempt - fail again (max attempts reached, should go to DLQ)
+    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim2.taskProto().getAttempts()).isEqualTo(2);
+    claim2.fail().get(5, TimeUnit.SECONDS);
+
+    // Task should be in DLQ
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+  }
+
+  @Test
+  void testDlqFailureReasonStoredAndRetrievable() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    queue.enqueue("reason-task", "reason-data").get(5, TimeUnit.SECONDS);
+
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    claim.fail("Connection timeout").get(5, TimeUnit.SECONDS);
+
+    // Verify failure reason is stored
+    List<DeadLetteredTask> dlqTasks = queue.listDlqTasks(10).get(5, TimeUnit.SECONDS);
+    assertThat(dlqTasks).hasSize(1);
+    assertThat(dlqTasks.get(0).getFailureReason()).isEqualTo("Connection timeout");
+    assertThat(dlqTasks.get(0).getAttempts()).isEqualTo(1);
+  }
+
+  @Test
+  void testDlqFailTaskWithNullReason() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    queue.enqueue("null-reason", "data").get(5, TimeUnit.SECONDS);
+
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    claim.fail().get(5, TimeUnit.SECONDS); // null failure reason (backward compat)
+
+    List<DeadLetteredTask> dlqTasks = queue.listDlqTasks(10).get(5, TimeUnit.SECONDS);
+    assertThat(dlqTasks).hasSize(1);
+    assertThat(dlqTasks.get(0).getFailureReason()).isEmpty(); // null stored as empty string
+  }
+
+  @Test
+  void testRedriveFromDlqByKey() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    queue.enqueue("redrive-key", "redrive-data").get(5, TimeUnit.SECONDS);
+
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    claim.fail("test failure").get(5, TimeUnit.SECONDS);
+
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    // Redrive by key
+    queue.redriveFromDlq("redrive-key").get(5, TimeUnit.SECONDS);
+
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+
+    // Task should be immediately claimable with attempts reset
+    var redriven = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(redriven.task()).isEqualTo("redrive-data");
+    assertThat(redriven.taskProto().getAttempts()).isEqualTo(1); // reset
+    redriven.complete().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testRedriveFromDlqByCount() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    // Add 3 tasks to DLQ
+    for (int i = 1; i <= 3; i++) {
+      queue.enqueue("count-key-" + i, "count-data-" + i).get(5, TimeUnit.SECONDS);
+      var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+      claim.fail().get(5, TimeUnit.SECONDS);
+    }
+
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(3);
+
+    // Redrive 2 of 3
+    int redriven = queue.redriveFromDlq(2).get(5, TimeUnit.SECONDS);
+    assertThat(redriven).isEqualTo(2);
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    // Claim the 2 redriven tasks
+    var c1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    var c2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    c1.complete().get(5, TimeUnit.SECONDS);
+    c2.complete().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testPurgeDlq() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    // Add 3 tasks to DLQ
+    for (int i = 1; i <= 3; i++) {
+      queue.enqueue("purge-key-" + i, "purge-data-" + i).get(5, TimeUnit.SECONDS);
+      var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+      claim.fail().get(5, TimeUnit.SECONDS);
+    }
+
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(3);
+
+    // Purge all
+    queue.purgeDlq().get(5, TimeUnit.SECONDS);
+
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(queue.listDlqTasks(10).get(5, TimeUnit.SECONDS)).isEmpty();
+  }
+
+  @Test
+  void testGetDlqSize() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    // Initially empty
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+
+    // Add one task to DLQ
+    queue.enqueue("size-key-1", "data-1").get(5, TimeUnit.SECONDS);
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    claim1.fail().get(5, TimeUnit.SECONDS);
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    // Add another
+    queue.enqueue("size-key-2", "data-2").get(5, TimeUnit.SECONDS);
+    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    claim2.fail().get(5, TimeUnit.SECONDS);
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+
+    // Redrive one
+    queue.redriveFromDlq(1).get(5, TimeUnit.SECONDS);
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    // Purge remaining
+    queue.purgeDlq().get(5, TimeUnit.SECONDS);
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+  }
+
+  @Test
+  void testListDlqTasksOrderAndLimit() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    // Add 3 tasks to DLQ
+    for (int i = 1; i <= 3; i++) {
+      queue.enqueue("list-key-" + i, "list-data-" + i).get(5, TimeUnit.SECONDS);
+      var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+      claim.fail("failure-" + i).get(5, TimeUnit.SECONDS);
+    }
+
+    // List all
+    List<DeadLetteredTask> allTasks = queue.listDlqTasks(10).get(5, TimeUnit.SECONDS);
+    assertThat(allTasks).hasSize(3);
+
+    // List with limit
+    List<DeadLetteredTask> limitedTasks = queue.listDlqTasks(2).get(5, TimeUnit.SECONDS);
+    assertThat(limitedTasks).hasSize(2);
+  }
+
+  @Test
+  void testRedrivenTaskIsImmediatelyClaimable() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    queue.enqueue("immediate-key", "immediate-data").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    claim.fail().get(5, TimeUnit.SECONDS);
+
+    // Redrive
+    queue.redriveFromDlq("immediate-key").get(5, TimeUnit.SECONDS);
+
+    // Should be immediately claimable (no delay)
+    var redriven = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(redriven).isNotNull();
+    assertThat(redriven.task()).isEqualTo("immediate-data");
+    assertThat(redriven.taskProto().getAttempts()).isEqualTo(1);
+
+    // Complete and verify queue is empty
+    redriven.complete().get(5, TimeUnit.SECONDS);
+    assertQueueIsEmpty(queue);
+  }
+
+  @Test
+  void testFailTaskWithExplicitFailureReason() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    queue.enqueue("explicit-reason", "data").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    // Use explicit failTask with reason
+    queue.failTask(claim, "Database connection lost").get(5, TimeUnit.SECONDS);
+
+    List<DeadLetteredTask> dlqTasks = queue.listDlqTasks(10).get(5, TimeUnit.SECONDS);
+    assertThat(dlqTasks).hasSize(1);
+    assertThat(dlqTasks.get(0).getFailureReason()).isEqualTo("Database connection lost");
   }
 }
