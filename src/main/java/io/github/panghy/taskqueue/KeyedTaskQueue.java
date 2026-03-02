@@ -61,8 +61,10 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   // OpenTelemetry instrumentation - instance fields
   private final Tracer tracer;
+
   @SuppressWarnings("FieldCanBeLocal")
   private final Meter meter;
+
   private final LongCounter tasksEnqueued;
   private final LongCounter tasksClaimed;
   private final LongCounter tasksCompleted;
@@ -320,7 +322,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
           // Record metrics
           tasksEnqueued.add(1, Attributes.of(QUEUE_PATH, queuePath));
-          unclaimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
+          if (!result.hasCurrentClaim()) {
+            unclaimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
+          }
 
           span.setStatus(StatusCode.OK).end();
           return result;
@@ -343,15 +347,18 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .startSpan();
 
     AtomicReference<TaskClaim<K, T>> ref = new AtomicReference<>();
+    AtomicReference<Boolean> claimedFromUnclaimed = new AtomicReference<>(false);
     return AsyncUtil.whileTrue(
             () -> {
               checkNotClosed();
               CompletableFuture<CompletableFuture<Void>> watchFF = db.runAsync(tr -> {
                 ref.set(null);
+                claimedFromUnclaimed.set(false);
                 var unclaimedTaskOptF = findUnclaimedTask(tr);
                 return unclaimedTaskOptF.thenCompose(claimedTaskO -> {
                   if (claimedTaskO.isPresent()) {
                     ref.set(claimedTaskO.get());
+                    claimedFromUnclaimed.set(true);
                     return completedFuture(null);
                   }
                   return findAndReclaimExpiredTask(tr).thenApply(taskO -> {
@@ -410,8 +417,10 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             }
 
             tasksClaimed.add(1, Attributes.of(QUEUE_PATH, queuePath));
-            unclaimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
-            claimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
+            if (claimedFromUnclaimed.get()) {
+              unclaimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
+              claimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
+            }
             span.addEvent("Task claimed successfully")
                 .setStatus(StatusCode.OK)
                 .end();
@@ -443,6 +452,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     var taskMetadataF = getTaskMetadataAsync(tr, taskKeyBytes);
     UUID taskUuid = bytesToUuid(taskClaim.taskProto().getTaskUuid().toByteArray());
     AtomicReference<Boolean> newerVersionScheduled = new AtomicReference<>(false);
+    AtomicReference<Boolean> taskActuallyCompleted = new AtomicReference<>(false);
     return taskMetadataF
         .thenCompose(taskMetadataProto -> {
           if (taskMetadataProto == null) {
@@ -467,6 +477,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                 .end();
             return completedFuture(null);
           }
+          taskActuallyCompleted.set(true);
           // remove the task from claimed space.
           Instant currentExpiration =
               toJavaTimestamp(taskMetadataProto.getCurrentClaim().getExpirationTime());
@@ -521,23 +532,27 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                 .end();
             throw new CompletionException(error);
           } else {
-            // Record processing duration if we have creation time
-            if (taskClaim.taskProto().hasCreationTime()) {
-              long duration = config.getInstantSource().instant().toEpochMilli()
-                  - toJavaTimestamp(taskClaim.taskProto().getCreationTime())
-                      .toEpochMilli();
-              taskProcessingDuration.record(duration, Attributes.of(QUEUE_PATH, queuePath));
-              span.setAttribute("task.processing.duration.ms", duration);
-            }
+            if (taskActuallyCompleted.get()) {
+              // Record processing duration if we have creation time
+              if (taskClaim.taskProto().hasCreationTime()) {
+                long duration = config.getInstantSource()
+                        .instant()
+                        .toEpochMilli()
+                    - toJavaTimestamp(taskClaim.taskProto().getCreationTime())
+                        .toEpochMilli();
+                taskProcessingDuration.record(duration, Attributes.of(QUEUE_PATH, queuePath));
+                span.setAttribute("task.processing.duration.ms", duration);
+              }
 
-            tasksCompleted.add(1, Attributes.of(QUEUE_PATH, queuePath));
-            claimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
-            if (newerVersionScheduled.get()) {
-              unclaimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
+              tasksCompleted.add(1, Attributes.of(QUEUE_PATH, queuePath));
+              claimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
+              if (newerVersionScheduled.get()) {
+                unclaimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
+              }
+              span.addEvent("Task completed successfully")
+                  .setStatus(StatusCode.OK)
+                  .end();
             }
-            span.addEvent("Task completed successfully")
-                .setStatus(StatusCode.OK)
-                .end();
             return null;
           }
         });
@@ -643,6 +658,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     UUID taskUuid = bytesToUuid(taskClaim.taskProto().getTaskUuid().toByteArray());
     LOGGER.debug("Failing task: {}", describeTask(taskUuid, taskClaim.task()));
     AtomicReference<Boolean> rescheduledToUnclaimed = new AtomicReference<>(false);
+    AtomicReference<Boolean> taskActuallyFailed = new AtomicReference<>(false);
     return taskMetadataF
         .thenCompose(taskMetadataProto -> {
           if (taskMetadataProto == null) {
@@ -661,6 +677,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                 describeTask(taskUuid, taskClaim.task()));
             return completedFuture(null);
           }
+          taskActuallyFailed.set(true);
           // remove the task from claimed space.
           Instant currentExpiration =
               toJavaTimestamp(taskMetadataProto.getCurrentClaim().getExpirationTime());
@@ -677,11 +694,19 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                   taskClaim.taskProto().getAttempts());
               // clear all versions of the task (+ metadata).
               tr.clear(Range.startsWith(taskKeys.pack(taskKeyB)));
-              config.getListener()
-                  .onTaskExhausted(
-                      taskClaim.taskKey(),
-                      taskClaim.task(),
-                      taskClaim.taskProto().getAttempts());
+              try {
+                config.getListener()
+                    .onTaskExhausted(
+                        taskClaim.taskKey(),
+                        taskClaim.task(),
+                        taskClaim.taskProto().getAttempts());
+              } catch (Exception e) {
+                LOGGER.error(
+                    "TaskQueue listener onTaskExhausted threw an exception for task {}",
+                    describeTask(taskUuid, taskClaim.task()),
+                    e);
+              }
+              incrementWatchKey(tr);
             } else {
               rescheduledToUnclaimed.set(true);
               LOGGER.debug(
@@ -736,15 +761,23 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                 .end();
             throw new CompletionException(error);
           } else {
-            tasksFailed.add(1, Attributes.of(QUEUE_PATH, queuePath));
-            claimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
-            if (rescheduledToUnclaimed.get()) {
-              unclaimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
-            }
+            if (taskActuallyFailed.get()) {
+              tasksFailed.add(1, Attributes.of(QUEUE_PATH, queuePath));
+              claimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
+              if (rescheduledToUnclaimed.get()) {
+                unclaimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
+              }
 
-            span.addEvent("Task marked as failed", Attributes.of(TASK_ATTEMPTS, taskClaim.getAttempts()))
-                .setStatus(StatusCode.OK)
-                .end();
+              span.addEvent(
+                      "Task marked as failed",
+                      Attributes.of(TASK_ATTEMPTS, taskClaim.getAttempts()))
+                  .setStatus(StatusCode.OK)
+                  .end();
+            } else {
+              span.addEvent("Task fail was a no-op (metadata missing or claim mismatch)")
+                  .setStatus(StatusCode.OK)
+                  .end();
+            }
             return null;
           }
         });
@@ -805,8 +838,16 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKey.toByteArray(), taskProto.getTaskVersion())));
           unclaimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
-          config.getListener()
-              .onTaskExhausted(config.getKeySerializer().deserialize(taskKey), taskObj, attempts);
+          try {
+            config.getListener()
+                .onTaskExhausted(config.getKeySerializer().deserialize(taskKey), taskObj, attempts);
+          } catch (Exception e) {
+            LOGGER.error(
+                "TaskQueue listener onTaskExhausted threw an exception for task {}",
+                describeTask(taskUuid, taskObj),
+                e);
+          }
+          incrementWatchKey(tr);
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
           LOGGER.warn(
@@ -933,11 +974,18 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         LOGGER.debug("Found expired claimed task: {}", describeTask(taskUuid, taskObj));
         K taskKeyObj = config.getKeySerializer().deserialize(taskKeyBytes);
         // notify listener of expired task.
-        config.getListener()
-            .onTaskExpired(
-                taskKeyObj,
-                taskObj,
-                bytesToUuid(taskProto.getClaim().toByteArray()));
+        try {
+          config.getListener()
+              .onTaskExpired(
+                  taskKeyObj,
+                  taskObj,
+                  bytesToUuid(taskProto.getClaim().toByteArray()));
+        } catch (Exception e) {
+          LOGGER.error(
+              "TaskQueue listener onTaskExpired threw an exception for task {}",
+              describeTask(taskUuid, taskObj),
+              e);
+        }
         // reclaim the task using a new claim UUID.
         UUID claimUuid = UUID.randomUUID();
         ByteString claimUuidBytes = ByteString.copyFrom(uuidToBytes(claimUuid));
@@ -947,7 +995,15 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), taskProto.getTaskVersion())));
           claimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
-          config.getListener().onTaskExhausted(taskKeyObj, taskObj, attempts);
+          try {
+            config.getListener().onTaskExhausted(taskKeyObj, taskObj, attempts);
+          } catch (Exception e) {
+            LOGGER.error(
+                "TaskQueue listener onTaskExhausted threw an exception for task {}",
+                describeTask(taskUuid, taskObj),
+                e);
+          }
+          incrementWatchKey(tr);
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
           LOGGER.warn(
@@ -975,7 +1031,14 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         tr.clear(taskKV.getKey());
         storeClaimedTask(tr, deadline, taskUuid, updatedTaskProto);
         LOGGER.debug("Reclaiming task: {} with claim: {}", describeTask(taskUuid, taskObj), claimUuid);
-        config.getListener().onTaskReclaimed(taskKeyObj, taskObj, attempts);
+        try {
+          config.getListener().onTaskReclaimed(taskKeyObj, taskObj, attempts);
+        } catch (Exception e) {
+          LOGGER.error(
+              "TaskQueue listener onTaskReclaimed threw an exception for task {}",
+              describeTask(taskUuid, taskObj),
+              e);
+        }
         return Optional.of(TaskClaim.<K, T>builder()
             .taskProto(updatedTaskProto)
             .taskKeyProto(latestTaskKey)
