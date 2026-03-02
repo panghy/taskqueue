@@ -25,6 +25,7 @@ import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.LongHistogram;
+import io.opentelemetry.api.metrics.LongUpDownCounter;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
@@ -66,6 +67,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   private final LongCounter tasksFailed;
   private final LongHistogram taskProcessingDuration;
   private final LongHistogram taskWaitTime;
+  private final LongUpDownCounter unclaimedQueueSize;
+  private final LongUpDownCounter claimedQueueSize;
 
   // Attribute keys for spans and metrics
   private static final AttributeKey<String> TASK_KEY = AttributeKey.stringKey("task.key");
@@ -82,6 +85,10 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   private final DirectorySubspace taskKeys;
   private final byte[] watchKey;
   private final String queuePath;
+
+  // Graceful shutdown support
+  private volatile boolean closed = false;
+  private final CompletableFuture<Void> closeFuture = new CompletableFuture<>();
 
   /**
    * Private constructor. Use {@link #createOrOpen(TaskQueueConfig, TransactionContext)} to create an instance.
@@ -137,6 +144,16 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .setUnit("ms")
         .ofLongs()
         .build();
+
+    this.unclaimedQueueSize = meter.upDownCounterBuilder("taskqueue.queue.unclaimed.size")
+        .setDescription("Current number of unclaimed tasks in the queue")
+        .setUnit("tasks")
+        .build();
+
+    this.claimedQueueSize = meter.upDownCounterBuilder("taskqueue.queue.claimed.size")
+        .setDescription("Current number of claimed tasks in the queue")
+        .setUnit("tasks")
+        .build();
   }
 
   /**
@@ -167,6 +184,41 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   @Override
   public TaskQueueConfig<K, T> getConfig() {
     return config;
+  }
+
+  @Override
+  public void close() {
+    closed = true;
+    closeFuture.completeExceptionally(new TaskQueueException("Queue is closed"));
+  }
+
+  private void checkNotClosed() {
+    if (closed) {
+      throw new TaskQueueException("Queue is closed");
+    }
+  }
+
+  /**
+   * Wraps a watch future so that it also fails if the queue is closed.
+   * Returns a future that completes when either the watch triggers or the queue is closed
+   * (in which case it completes exceptionally).
+   */
+  private CompletableFuture<Void> raceWithClose(CompletableFuture<Void> watchF) {
+    CompletableFuture<Void> raced = new CompletableFuture<>();
+    watchF.whenComplete((v, ex) -> {
+      if (ex != null) {
+        raced.completeExceptionally(ex);
+      } else {
+        raced.complete(v);
+      }
+    });
+    closeFuture.whenComplete((v, ex) -> {
+      if (ex != null) {
+        raced.completeExceptionally(ex);
+        watchF.cancel(true);
+      }
+    });
+    return raced;
   }
 
   @Override
@@ -266,6 +318,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
           // Record metrics
           tasksEnqueued.add(1, Attributes.of(QUEUE_PATH, queuePath));
+          unclaimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
 
           span.setStatus(StatusCode.OK).end();
           return result;
@@ -280,6 +333,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   @Override
   public CompletableFuture<TaskClaim<K, T>> awaitAndClaimTask(Database db) {
+    checkNotClosed();
+
     Span span = tracer.spanBuilder("taskqueue.awaitAndClaimTask")
         .setSpanKind(SpanKind.CONSUMER)
         .setAttribute(QUEUE_PATH, queuePath)
@@ -288,6 +343,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     AtomicReference<TaskClaim<K, T>> ref = new AtomicReference<>();
     return AsyncUtil.whileTrue(
             () -> {
+              checkNotClosed();
               var watchFF = db.runAsync(tr -> {
                 ref.set(null);
                 var unclaimedTaskOptF = findUnclaimedTask(tr);
@@ -327,6 +383,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               return watchFF.thenCompose(watchF -> {
                 // watchF is null if a task was found.
                 if (watchF != null) {
+                  var racedWatch = raceWithClose(watchF);
                   return nextExpirationOF.thenCompose(nextExpirationO -> {
                     if (nextExpirationO.isPresent()) {
                       long sleepTime =
@@ -335,14 +392,25 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                                   .instant()
                                   .toEpochMilli();
                       if (sleepTime > 0) {
-                        return watchF.orTimeout(sleepTime, TimeUnit.MILLISECONDS)
-                            .exceptionally($ -> null)
+                        return racedWatch
+                            .orTimeout(sleepTime, TimeUnit.MILLISECONDS)
+                            .exceptionally(ex -> {
+                              // Re-throw TaskQueueException (from close), swallow timeout
+                              if (ex instanceof TaskQueueException) {
+                                throw (TaskQueueException) ex;
+                              }
+                              if (ex instanceof CompletionException
+                                  && ex.getCause() instanceof TaskQueueException) {
+                                throw (TaskQueueException) ex.getCause();
+                              }
+                              return null;
+                            })
                             .thenApply($ -> true);
                       }
                       watchF.cancel(true);
                       return completedFuture(true);
                     }
-                    return watchF.thenApply($ -> true);
+                    return racedWatch.thenApply($ -> true);
                   });
                 }
                 return completedFuture(false);
@@ -367,6 +435,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             }
 
             tasksClaimed.add(1, Attributes.of(QUEUE_PATH, queuePath));
+            unclaimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
+            claimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
             span.addEvent("Task claimed successfully")
                 .setStatus(StatusCode.OK)
                 .end();
@@ -397,6 +467,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     ByteString taskKeyBytes = taskClaim.taskProto().getTaskKey();
     var taskMetadataF = getTaskMetadataAsync(tr, taskKeyBytes);
     UUID taskUuid = bytesToUuid(taskClaim.taskProto().getTaskUuid().toByteArray());
+    AtomicReference<Boolean> newerVersionScheduled = new AtomicReference<>(false);
     return taskMetadataF
         .thenCompose(taskMetadataProto -> {
           if (taskMetadataProto == null) {
@@ -435,6 +506,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             return completedFuture(null);
           } else {
             // another version of the task needs to be scheduled.
+            newerVersionScheduled.set(true);
             var taskKeyF = getTaskKeyAsync(tr, taskKeyBytes, taskMetadataProto.getHighestVersionSeen());
             return taskKeyF.thenApply(taskKeyProto -> {
               LOGGER.debug(
@@ -484,6 +556,10 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             }
 
             tasksCompleted.add(1, Attributes.of(QUEUE_PATH, queuePath));
+            claimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
+            if (newerVersionScheduled.get()) {
+              unclaimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
+            }
             span.addEvent("Task completed successfully")
                 .setStatus(StatusCode.OK)
                 .end();
@@ -591,6 +667,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     var taskMetadataF = getTaskMetadataAsync(tr, taskKeyBytes);
     UUID taskUuid = bytesToUuid(taskClaim.taskProto().getTaskUuid().toByteArray());
     LOGGER.debug("Failing task: {}", describeTask(taskUuid, taskClaim.task()));
+    AtomicReference<Boolean> rescheduledToUnclaimed = new AtomicReference<>(false);
     return taskMetadataF
         .thenCompose(taskMetadataProto -> {
           if (taskMetadataProto == null) {
@@ -625,7 +702,13 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                   taskClaim.taskProto().getAttempts());
               // clear all versions of the task (+ metadata).
               tr.clear(Range.startsWith(taskKeys.pack(taskKeyB)));
+              config.getListener()
+                  .onTaskExhausted(
+                      taskClaim.taskKey(),
+                      taskClaim.task(),
+                      taskClaim.taskProto().getAttempts());
             } else {
+              rescheduledToUnclaimed.set(true);
               LOGGER.debug(
                   "Failing task: {} with {} attempts. Rescheduling for future execution.",
                   describeTask(taskUuid, taskClaim.task()),
@@ -644,6 +727,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             return completedFuture(null);
           } else {
             // we are not the latest version, fail the task and schedule the latest version.
+            rescheduledToUnclaimed.set(true);
             LOGGER.info(
                 "Task {} is not the latest version: {} != {}. Skipping to latest version.",
                 describeTask(taskUuid, taskClaim.task()),
@@ -678,6 +762,10 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             throw new CompletionException(error);
           } else {
             tasksFailed.add(1, Attributes.of(QUEUE_PATH, queuePath));
+            claimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
+            if (rescheduledToUnclaimed.get()) {
+              unclaimedQueueSize.add(1, Attributes.of(QUEUE_PATH, queuePath));
+            }
 
             span.addEvent("Task marked as failed", Attributes.of(TASK_ATTEMPTS, taskClaim.getAttempts()))
                 .setStatus(StatusCode.OK)
@@ -741,6 +829,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           LOGGER.warn("Task {} has reached max attempts: {}", describeTask(taskUuid, taskObj), attempts);
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKey.toByteArray(), taskProto.getTaskVersion())));
+          unclaimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
+          config.getListener()
+              .onTaskExhausted(config.getKeySerializer().deserialize(taskKey), taskObj, attempts);
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
           LOGGER.warn(
@@ -865,6 +956,13 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         T taskObj = config.getTaskSerializer().deserialize(latestTaskKey.getTask());
         UUID taskUuid = bytesToUuid(taskProto.getTaskUuid().toByteArray());
         LOGGER.debug("Found expired claimed task: {}", describeTask(taskUuid, taskObj));
+        K taskKeyObj = config.getKeySerializer().deserialize(taskKeyBytes);
+        // notify listener of expired task.
+        config.getListener()
+            .onTaskExpired(
+                taskKeyObj,
+                taskObj,
+                bytesToUuid(taskProto.getClaim().toByteArray()));
         // reclaim the task using a new claim UUID.
         UUID claimUuid = UUID.randomUUID();
         ByteString claimUuidBytes = ByteString.copyFrom(uuidToBytes(claimUuid));
@@ -873,6 +971,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           LOGGER.warn("Task {} has reached max attempts: {}", describeTask(taskUuid, taskObj), attempts);
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), taskProto.getTaskVersion())));
+          claimedQueueSize.add(-1, Attributes.of(QUEUE_PATH, queuePath));
+          config.getListener().onTaskExhausted(taskKeyObj, taskObj, attempts);
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
           LOGGER.warn(
@@ -900,6 +1000,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         tr.clear(taskKV.getKey());
         storeClaimedTask(tr, deadline, taskUuid, updatedTaskProto);
         LOGGER.debug("Reclaiming task: {} with claim: {}", describeTask(taskUuid, taskObj), claimUuid);
+        config.getListener().onTaskReclaimed(taskKeyObj, taskObj, attempts);
         return Optional.of(TaskClaim.<K, T>builder()
             .taskProto(updatedTaskProto)
             .taskKeyProto(latestTaskKey)
@@ -1095,6 +1196,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   @Override
   public CompletableFuture<Void> awaitQueueEmpty(Database db) {
+    checkNotClosed();
+
     Span span = tracer.spanBuilder("taskqueue.awaitQueueEmpty")
         .setSpanKind(SpanKind.CONSUMER)
         .setAttribute(QUEUE_PATH, queuePath)
@@ -1102,6 +1205,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
     return AsyncUtil.whileTrue(
             () -> {
+              checkNotClosed();
               var watchFF = db.runAsync(tr -> {
                 // Check if both unclaimed and claimed queues are empty
                 var unclaimedEmptyF = tr.getRange(unclaimedTasks.range(), 1)
@@ -1132,6 +1236,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                   return completedFuture(false);
                 }
 
+                var racedWatch = raceWithClose(watchF);
+
                 // Find the next expiration time for claimed tasks (in case they expire and queue
                 // becomes empty)
                 var nextExpirationOF = db.runAsync(tr -> findNextExpiration(tr, claimedTasks));
@@ -1144,8 +1250,19 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                             .toEpochMilli();
                     if (sleepTime > 0) {
                       // Wait for either the watch to trigger or the next expiration
-                      return watchF.orTimeout(sleepTime, TimeUnit.MILLISECONDS)
-                          .exceptionally($ -> null)
+                      return racedWatch
+                          .orTimeout(sleepTime, TimeUnit.MILLISECONDS)
+                          .exceptionally(ex -> {
+                            // Re-throw TaskQueueException (from close), swallow timeout
+                            if (ex instanceof TaskQueueException) {
+                              throw (TaskQueueException) ex;
+                            }
+                            if (ex instanceof CompletionException
+                                && ex.getCause() instanceof TaskQueueException) {
+                              throw (TaskQueueException) ex.getCause();
+                            }
+                            return null;
+                          })
                           .thenApply($ -> true);
                     }
                     // Expiration has already passed, cancel watch and check again
@@ -1153,7 +1270,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                     return completedFuture(true);
                   }
                   // No expiration time, just wait for the watch
-                  return watchF.thenApply($ -> true);
+                  return racedWatch.thenApply($ -> true);
                 });
               });
             },

@@ -12,7 +12,16 @@ import java.util.function.Function;
  * @param <K> the type of task keys
  * @param <T> the type of task data
  */
-public interface BaseTaskQueue<K, T> {
+public interface BaseTaskQueue<K, T> extends AutoCloseable {
+
+  /**
+   * Closes this task queue, cancelling any outstanding watches and causing in-progress
+   * {@link #awaitAndClaimTask} / {@link #awaitQueueEmpty} loops to complete exceptionally
+   * with a {@link TaskQueueException}. Subsequent calls to those methods will fail fast.
+   * This method is idempotent.
+   */
+  @Override
+  void close();
 
   /**
    * Gets the configuration for this task queue.
