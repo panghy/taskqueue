@@ -124,6 +124,35 @@ public interface TaskQueue<K, T> {
   }
 
   /**
+   * Enqueues a task with a custom delay. Uses a standalone transaction. If a task with the same key exists
+   * (whether it is running or not), a new version of the task will be created (and will be picked up when the
+   * existing task completes).
+   *
+   * @param taskKey The key for the task.
+   * @param task    The task to enqueue.
+   * @param delay   The delay before the task should be executed.
+   * @return A future that completes with the task metadata.
+   */
+  default CompletableFuture<TaskKeyMetadata> enqueue(K taskKey, T task, Duration delay) {
+    return runAsync(tr -> enqueue(tr, taskKey, task, delay));
+  }
+
+  /**
+   * Enqueues a task with a custom delay and TTL. Uses a standalone transaction. If a task with the same key exists
+   * (whether it is running or not), a new version of the task will be created (and will be picked up when the
+   * existing task completes).
+   *
+   * @param taskKey The key for the task.
+   * @param task    The task to enqueue.
+   * @param delay   The delay before the task should be executed.
+   * @param ttl     The time-to-live for the task.
+   * @return A future that completes with the task metadata.
+   */
+  default CompletableFuture<TaskKeyMetadata> enqueue(K taskKey, T task, Duration delay, Duration ttl) {
+    return runAsync(tr -> enqueue(tr, taskKey, task, delay, ttl));
+  }
+
+  /**
    * Enqueues a task. If a task with the same key exists (whether it is running or not), a new version of the task
    * will be created (and will be picked up when the existing task completes).
    *
