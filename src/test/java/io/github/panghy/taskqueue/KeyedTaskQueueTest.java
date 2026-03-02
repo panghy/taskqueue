@@ -2008,7 +2008,7 @@ public class KeyedTaskQueueTest {
     // First attempt - fail
     var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
     assertThat(claim1.taskProto().getAttempts()).isEqualTo(1);
-    claim1.fail();
+    claim1.fail().get(5, TimeUnit.SECONDS);
 
     // Second attempt - fail again (max attempts reached)
     var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
@@ -2033,7 +2033,7 @@ public class KeyedTaskQueueTest {
 
     // First attempt - fail
     var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
-    claim1.fail();
+    claim1.fail().get(5, TimeUnit.SECONDS);
 
     // Second attempt - fail again (max attempts reached, should go to DLQ)
     var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
@@ -2105,10 +2105,11 @@ public class KeyedTaskQueueTest {
 
     assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
 
-    // Task should be immediately claimable with attempts reset
+    // Task should be immediately claimable with attempts representing the first attempt after redrive
     var redriven = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
     assertThat(redriven.task()).isEqualTo("redrive-data");
-    assertThat(redriven.taskProto().getAttempts()).isEqualTo(1); // reset
+    assertThat(redriven.taskProto().getAttempts())
+        .isEqualTo(1); // first attempt after redrive (counter reset on enqueue, incremented on claim)
     redriven.complete().get(5, TimeUnit.SECONDS);
   }
 
@@ -2270,5 +2271,56 @@ public class KeyedTaskQueueTest {
     List<DeadLetteredTask> dlqTasks = queue.listDlqTasks(10).get(5, TimeUnit.SECONDS);
     assertThat(dlqTasks).hasSize(1);
     assertThat(dlqTasks.get(0).getFailureReason()).isEqualTo("Database connection lost");
+  }
+
+  @Test
+  void testRedriveFromDlqByCount_negativeCount() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+    assertThatThrownBy(() -> queue.redriveFromDlq(-1).get(5, TimeUnit.SECONDS))
+        .hasRootCauseInstanceOf(IllegalArgumentException.class)
+        .hasRootCauseMessage("count must be non-negative, but was -1");
+  }
+
+  @Test
+  void testRedriveFromDlqByCount_zeroCount() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+    int result = queue.redriveFromDlq(0).get(5, TimeUnit.SECONDS);
+    assertThat(result).isEqualTo(0);
+  }
+
+  @Test
+  void testListDlqTasks_negativeLimit() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+    assertThatThrownBy(() -> queue.listDlqTasks(-1).get(5, TimeUnit.SECONDS))
+        .hasRootCauseInstanceOf(IllegalArgumentException.class)
+        .hasRootCauseMessage("limit must be non-negative, but was -1");
+  }
+
+  @Test
+  void testRedriveFromDlqByKey_notFound() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+    assertThatThrownBy(() -> queue.redriveFromDlq("nonexistent-key").get(5, TimeUnit.SECONDS))
+        .hasCauseInstanceOf(TaskQueueException.class)
+        .hasMessageContaining("No DLQ entry found");
   }
 }
