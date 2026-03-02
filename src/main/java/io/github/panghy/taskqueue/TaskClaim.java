@@ -52,7 +52,7 @@ public record TaskClaim<K, T>(
    * @return A future that completes when the task has been failed.
    */
   public CompletableFuture<Void> fail() {
-    return taskQueue.failTask(this);
+    return taskQueue.failTask(this, null);
   }
 
   /**
@@ -62,7 +62,29 @@ public record TaskClaim<K, T>(
    * @return A future that completes when the task has been failed.
    */
   public CompletableFuture<Void> fail(Transaction tr) {
-    return taskQueue.failTask(tr, this);
+    return taskQueue.failTask(tr, this, null);
+  }
+
+  /**
+   * Fails the task with a failure reason, causing it to be retried.
+   * Uses a standalone transaction.
+   *
+   * @param failureReason the reason for the failure (may be null)
+   * @return A future that completes when the task has been failed.
+   */
+  public CompletableFuture<Void> fail(String failureReason) {
+    return taskQueue.failTask(this, failureReason);
+  }
+
+  /**
+   * Fails the task within an existing transaction with a failure reason.
+   *
+   * @param tr            the transaction to use
+   * @param failureReason the reason for the failure (may be null)
+   * @return A future that completes when the task has been failed.
+   */
+  public CompletableFuture<Void> fail(Transaction tr, String failureReason) {
+    return taskQueue.failTask(tr, this, failureReason);
   }
 
   /**
