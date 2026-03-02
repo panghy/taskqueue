@@ -34,6 +34,7 @@ import io.opentelemetry.api.trace.Tracer;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -184,7 +185,11 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     }));
     return allOf(unclaimedTaskF, claimedTaskF, taskKeyF, dlqF, watchKeyF, watchKeyWriteF)
         .thenApply(v -> new KeyedTaskQueue<>(
-            config, unclaimedTaskF.join(), claimedTaskF.join(), taskKeyF.join(), dlqF.join(),
+            config,
+            unclaimedTaskF.join(),
+            claimedTaskF.join(),
+            taskKeyF.join(),
+            dlqF.join(),
             watchKeyF.join()));
   }
 
@@ -642,11 +647,30 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           if (taskClaim.taskProto().getTaskVersion() == taskMetadataProto.getHighestVersionSeen()) {
             // we are the latest version, fail the task.
             if (taskClaim.taskProto().getAttempts() >= config.getMaxAttempts()) {
-              // we have reached the max attempts, clear the task.
+              // we have reached the max attempts.
               LOGGER.warn(
-                  "Task {} has reached max attempts: {}. Skipping.",
+                  "Task {} has reached max attempts: {}.",
                   describeTask(taskUuid, taskClaim.task()),
                   taskClaim.taskProto().getAttempts());
+              if (config.isDlqEnabled()) {
+                // Move to dead letter queue.
+                DeadLetteredTask dlqEntry = DeadLetteredTask.newBuilder()
+                    .setTaskUuid(taskClaim.taskProto().getTaskUuid())
+                    .setTaskKey(taskKeyBytes)
+                    .setTask(taskClaim.taskKeyProto().getTask())
+                    .setCreationTime(taskClaim.taskProto().getCreationTime())
+                    .setDeadLetteredTime(fromJavaTimestamp(
+                        config.getInstantSource().instant()))
+                    .setFailureReason(failureReason != null ? failureReason : "")
+                    .setAttempts(taskClaim.taskProto().getAttempts())
+                    .build();
+                tr.set(dlqTasks.pack(Tuple.from(taskKeyB)), dlqEntry.toByteArray());
+                dlqAdded.add(1, Attributes.of(QUEUE_PATH, queuePath));
+                LOGGER.info(
+                    "Task {} moved to DLQ after {} attempts.",
+                    describeTask(taskUuid, taskClaim.task()),
+                    taskClaim.taskProto().getAttempts());
+              }
               // clear all versions of the task (+ metadata).
               tr.clear(Range.startsWith(taskKeys.pack(taskKeyB)));
             } else {
@@ -1197,26 +1221,85 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   @Override
   public CompletableFuture<Void> redriveFromDlq(Transaction tr, K taskKey) {
-    throw new UnsupportedOperationException("DLQ redrive not yet implemented");
+    ByteString taskKeyBytes = config.getKeySerializer().serialize(taskKey);
+    byte[] taskKeyB = taskKeyBytes.toByteArray();
+    byte[] dlqKey = dlqTasks.pack(Tuple.from(taskKeyB));
+    return tr.get(dlqKey).thenCompose(dlqValue -> {
+      if (dlqValue == null) {
+        throw new TaskQueueException("No DLQ entry found for task key: " + taskKey);
+      }
+      DeadLetteredTask dlqEntry;
+      try {
+        dlqEntry = DeadLetteredTask.parseFrom(dlqValue);
+      } catch (InvalidProtocolBufferException e) {
+        throw new TaskQueueException("Failed to parse DLQ entry", e);
+      }
+      // Re-enqueue the task with attempts=0 and immediate visibility.
+      T task = config.getTaskSerializer().deserialize(dlqEntry.getTask());
+      tr.clear(dlqKey);
+      dlqRedriven.add(1, Attributes.of(QUEUE_PATH, queuePath));
+      return enqueue(tr, taskKey, task, Duration.ZERO, config.getDefaultTtl())
+          .thenApply(v -> null);
+    });
   }
 
   @Override
   public CompletableFuture<Integer> redriveFromDlq(Transaction tr, int count) {
-    throw new UnsupportedOperationException("DLQ redrive not yet implemented");
+    return tr.getRange(dlqTasks.range(), count).asList().thenCompose(kvs -> {
+      int redriven = 0;
+      CompletableFuture<Void> chain = completedFuture(null);
+      for (KeyValue kv : kvs) {
+        DeadLetteredTask dlqEntry;
+        try {
+          dlqEntry = DeadLetteredTask.parseFrom(kv.getValue());
+        } catch (InvalidProtocolBufferException e) {
+          throw new TaskQueueException("Failed to parse DLQ entry", e);
+        }
+        K taskKey = config.getKeySerializer().deserialize(dlqEntry.getTaskKey());
+        T task = config.getTaskSerializer().deserialize(dlqEntry.getTask());
+        tr.clear(kv.getKey());
+        chain = chain.thenCompose(v -> enqueue(tr, taskKey, task, Duration.ZERO, config.getDefaultTtl())
+            .thenApply(m -> null));
+        redriven++;
+      }
+      int totalRedriven = redriven;
+      return chain.thenApply(v -> {
+        if (totalRedriven > 0) {
+          dlqRedriven.add(totalRedriven, Attributes.of(QUEUE_PATH, queuePath));
+        }
+        return totalRedriven;
+      });
+    });
   }
 
   @Override
   public CompletableFuture<Void> purgeDlq(Transaction tr) {
-    throw new UnsupportedOperationException("DLQ purge not yet implemented");
+    return getDlqSize(tr).thenApply(size -> {
+      tr.clear(dlqTasks.range());
+      if (size > 0) {
+        dlqPurged.add(size, Attributes.of(QUEUE_PATH, queuePath));
+      }
+      return null;
+    });
   }
 
   @Override
   public CompletableFuture<Long> getDlqSize(Transaction tr) {
-    throw new UnsupportedOperationException("DLQ size not yet implemented");
+    return tr.getRange(dlqTasks.range()).asList().thenApply(kvs -> (long) kvs.size());
   }
 
   @Override
   public CompletableFuture<List<DeadLetteredTask>> listDlqTasks(Transaction tr, int limit) {
-    throw new UnsupportedOperationException("DLQ list not yet implemented");
+    return tr.getRange(dlqTasks.range(), limit).asList().thenApply(kvs -> {
+      List<DeadLetteredTask> result = new ArrayList<>();
+      for (KeyValue kv : kvs) {
+        try {
+          result.add(DeadLetteredTask.parseFrom(kv.getValue()));
+        } catch (InvalidProtocolBufferException e) {
+          throw new TaskQueueException("Failed to parse DLQ entry", e);
+        }
+      }
+      return result;
+    });
   }
 }
