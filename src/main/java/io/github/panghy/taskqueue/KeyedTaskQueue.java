@@ -103,7 +103,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     this.queuePath = pathComponents.isEmpty() ? "/" : "/" + String.join("/", pathComponents);
 
     // Initialize OpenTelemetry instrumentation
-    this.tracer = GlobalOpenTelemetry.getTracer("io.github.panghy.taskqueue", "0.3.0");
+    this.tracer = GlobalOpenTelemetry.getTracer("io.github.panghy.taskqueue");
     this.meter = GlobalOpenTelemetry.getMeter("io.github.panghy.taskqueue");
 
     this.tasksEnqueued = meter.counterBuilder("taskqueue.tasks.enqueued")
