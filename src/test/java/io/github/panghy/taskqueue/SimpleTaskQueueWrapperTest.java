@@ -7,6 +7,7 @@ import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import com.apple.foundationdb.directory.DirectorySubspace;
+import io.github.panghy.taskqueue.proto.DeadLetteredTask;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -337,5 +338,149 @@ class SimpleTaskQueueWrapperTest {
     // Clean up
     TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
     taskQueue.completeTask(claim).get();
+  }
+
+  // ---- Dead Letter Queue (DLQ) Tests ----
+
+  @Test
+  void testDlqEnabled_tasksMoveToDlqAfterMaxAttempts()
+      throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(2)
+        .dlqEnabled(true)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    dlqQueue.enqueue("dlq-simple-task").get(5, TimeUnit.SECONDS);
+
+    // First attempt - fail
+    var claim1 = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    dlqQueue.failTask(claim1).get(5, TimeUnit.SECONDS);
+
+    // Second attempt - fail again (max attempts reached)
+    var claim2 = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    assertThat(claim2.taskProto().getAttempts()).isEqualTo(2);
+    dlqQueue.failTask(claim2).get(5, TimeUnit.SECONDS);
+
+    // Task should be in DLQ
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+  }
+
+  @Test
+  void testDlqFailureReasonStoredAndRetrievable() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    dlqQueue.enqueue("reason-task").get(5, TimeUnit.SECONDS);
+
+    var claim = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    dlqQueue.failTask(claim, "Timeout error").get(5, TimeUnit.SECONDS);
+
+    List<DeadLetteredTask> dlqTasks = dlqQueue.listDlqTasks(10).get(5, TimeUnit.SECONDS);
+    assertThat(dlqTasks).hasSize(1);
+    assertThat(dlqTasks.get(0).getFailureReason()).isEqualTo("Timeout error");
+  }
+
+  @Test
+  void testRedriveFromDlqByCount() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    // Add 2 tasks to DLQ
+    dlqQueue.enqueue("task-a").get(5, TimeUnit.SECONDS);
+    var claimA = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    dlqQueue.failTask(claimA).get(5, TimeUnit.SECONDS);
+
+    dlqQueue.enqueue("task-b").get(5, TimeUnit.SECONDS);
+    var claimB = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    dlqQueue.failTask(claimB).get(5, TimeUnit.SECONDS);
+
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+
+    // Redrive all
+    int redriven = dlqQueue.redriveFromDlq(10).get(5, TimeUnit.SECONDS);
+    assertThat(redriven).isEqualTo(2);
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+
+    // Claim redriven tasks
+    var r1 = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    var r2 = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    dlqQueue.completeTask(r1).get(5, TimeUnit.SECONDS);
+    dlqQueue.completeTask(r2).get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testPurgeDlq() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    dlqQueue.enqueue("purge-task").get(5, TimeUnit.SECONDS);
+    var claim = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    dlqQueue.failTask(claim).get(5, TimeUnit.SECONDS);
+
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    dlqQueue.purgeDlq().get(5, TimeUnit.SECONDS);
+
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+  }
+
+  @Test
+  void testGetDlqSizeEmpty() throws ExecutionException, InterruptedException, TimeoutException {
+    assertThat(taskQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+  }
+
+  @Test
+  void testListDlqTasksWithLimit() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    // Add 3 tasks to DLQ
+    for (int i = 1; i <= 3; i++) {
+      dlqQueue.enqueue("list-task-" + i).get(5, TimeUnit.SECONDS);
+      var claim = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+      dlqQueue.failTask(claim).get(5, TimeUnit.SECONDS);
+    }
+
+    List<DeadLetteredTask> allTasks = dlqQueue.listDlqTasks(10).get(5, TimeUnit.SECONDS);
+    assertThat(allTasks).hasSize(3);
+
+    List<DeadLetteredTask> limitedTasks = dlqQueue.listDlqTasks(1).get(5, TimeUnit.SECONDS);
+    assertThat(limitedTasks).hasSize(1);
+  }
+
+  @Test
+  void testFailTaskWithNullReason() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    dlqQueue.enqueue("null-reason-task").get(5, TimeUnit.SECONDS);
+    var claim = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    dlqQueue.failTask(claim).get(5, TimeUnit.SECONDS); // null reason
+
+    List<DeadLetteredTask> dlqTasks = dlqQueue.listDlqTasks(10).get(5, TimeUnit.SECONDS);
+    assertThat(dlqTasks).hasSize(1);
+    assertThat(dlqTasks.get(0).getFailureReason()).isEmpty();
   }
 }
