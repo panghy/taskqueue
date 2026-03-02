@@ -664,7 +664,11 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                     .setFailureReason(failureReason != null ? failureReason : "")
                     .setAttempts(taskClaim.taskProto().getAttempts())
                     .build();
-                tr.set(dlqTasks.pack(Tuple.from(taskKeyB)), dlqEntry.toByteArray());
+                long deadLetteredTimeMillis =
+                    config.getInstantSource().instant().toEpochMilli();
+                tr.set(
+                    dlqTasks.pack(Tuple.from(deadLetteredTimeMillis, taskKeyB)),
+                    dlqEntry.toByteArray());
                 dlqAdded.add(1, Attributes.of(QUEUE_PATH, queuePath));
                 LOGGER.info(
                     "Task {} moved to DLQ after {} attempts.",
@@ -673,6 +677,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               }
               // clear all versions of the task (+ metadata).
               tr.clear(Range.startsWith(taskKeys.pack(taskKeyB)));
+              // notify watchers that the queue has changed (and may now be empty).
+              incrementWatchKey(tr);
             } else {
               LOGGER.debug(
                   "Failing task: {} with {} attempts. Rescheduling for future execution.",
@@ -1223,28 +1229,39 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   public CompletableFuture<Void> redriveFromDlq(Transaction tr, K taskKey) {
     ByteString taskKeyBytes = config.getKeySerializer().serialize(taskKey);
     byte[] taskKeyB = taskKeyBytes.toByteArray();
-    byte[] dlqKey = dlqTasks.pack(Tuple.from(taskKeyB));
-    return tr.get(dlqKey).thenCompose(dlqValue -> {
-      if (dlqValue == null) {
-        throw new TaskQueueException("No DLQ entry found for task key: " + taskKey);
+    // DLQ entries are keyed by (timestamp, taskKeyBytes), so we need to scan to find the
+    // entry matching the given task key.
+    return tr.getRange(dlqTasks.range()).asList().thenCompose(kvs -> {
+      for (KeyValue kv : kvs) {
+        Tuple keyTuple = dlqTasks.unpack(kv.getKey());
+        byte[] entryTaskKeyB = keyTuple.getBytes(1);
+        if (java.util.Arrays.equals(entryTaskKeyB, taskKeyB)) {
+          DeadLetteredTask dlqEntry;
+          try {
+            dlqEntry = DeadLetteredTask.parseFrom(kv.getValue());
+          } catch (InvalidProtocolBufferException e) {
+            throw new TaskQueueException("Failed to parse DLQ entry", e);
+          }
+          // Re-enqueue the task with attempts=0 and immediate visibility.
+          T task = config.getTaskSerializer().deserialize(dlqEntry.getTask());
+          tr.clear(kv.getKey());
+          dlqRedriven.add(1, Attributes.of(QUEUE_PATH, queuePath));
+          return enqueue(tr, taskKey, task, Duration.ZERO, config.getDefaultTtl())
+              .thenApply(v -> null);
+        }
       }
-      DeadLetteredTask dlqEntry;
-      try {
-        dlqEntry = DeadLetteredTask.parseFrom(dlqValue);
-      } catch (InvalidProtocolBufferException e) {
-        throw new TaskQueueException("Failed to parse DLQ entry", e);
-      }
-      // Re-enqueue the task with attempts=0 and immediate visibility.
-      T task = config.getTaskSerializer().deserialize(dlqEntry.getTask());
-      tr.clear(dlqKey);
-      dlqRedriven.add(1, Attributes.of(QUEUE_PATH, queuePath));
-      return enqueue(tr, taskKey, task, Duration.ZERO, config.getDefaultTtl())
-          .thenApply(v -> null);
+      throw new TaskQueueException("No DLQ entry found for task key: " + taskKey);
     });
   }
 
   @Override
   public CompletableFuture<Integer> redriveFromDlq(Transaction tr, int count) {
+    if (count < 0) {
+      throw new IllegalArgumentException("count must be non-negative, but was " + count);
+    }
+    if (count == 0) {
+      return completedFuture(0);
+    }
     return tr.getRange(dlqTasks.range(), count).asList().thenCompose(kvs -> {
       int redriven = 0;
       CompletableFuture<Void> chain = completedFuture(null);
@@ -1274,22 +1291,26 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   @Override
   public CompletableFuture<Void> purgeDlq(Transaction tr) {
-    return getDlqSize(tr).thenApply(size -> {
-      tr.clear(dlqTasks.range());
-      if (size > 0) {
-        dlqPurged.add(size, Attributes.of(QUEUE_PATH, queuePath));
-      }
-      return null;
-    });
+    tr.clear(dlqTasks.range());
+    // Note: we intentionally skip counting DLQ entries before purging to avoid
+    // scanning the entire DLQ, which can be expensive for large queues and risk
+    // transaction size/time limits.
+    return completedFuture(null);
   }
 
   @Override
   public CompletableFuture<Long> getDlqSize(Transaction tr) {
+    // Note: this reads the entire DLQ range into memory. For very large DLQs,
+    // this may be slow and risk transaction size limits. A stored counter could
+    // be used instead if this becomes a bottleneck.
     return tr.getRange(dlqTasks.range()).asList().thenApply(kvs -> (long) kvs.size());
   }
 
   @Override
   public CompletableFuture<List<DeadLetteredTask>> listDlqTasks(Transaction tr, int limit) {
+    if (limit < 0) {
+      throw new IllegalArgumentException("limit must be non-negative, but was " + limit);
+    }
     return tr.getRange(dlqTasks.range(), limit).asList().thenApply(kvs -> {
       List<DeadLetteredTask> result = new ArrayList<>();
       for (KeyValue kv : kvs) {
