@@ -274,7 +274,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           span.recordException(error)
               .setStatus(StatusCode.ERROR, error.getMessage())
               .end();
-          throw new RuntimeException(error);
+          throw new CompletionException(error);
         });
   }
 
