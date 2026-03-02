@@ -2316,6 +2316,185 @@ public class KeyedTaskQueueTest {
     assertUpDownCounterValue(metrics, "taskqueue.queue.claimed.size", 0);
   }
 
+  @Test
+  void testEnqueueWithNullDelay() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    assertThatThrownBy(() -> db.runAsync(tr -> queue.enqueue(tr, "key", "data", null, Duration.ofMinutes(5)))
+            .get(5, TimeUnit.SECONDS))
+        .hasCauseInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void testEnqueueWithNullTtl() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    assertThatThrownBy(() -> db.runAsync(tr -> queue.enqueue(tr, "key", "data", Duration.ZERO, null))
+            .get(5, TimeUnit.SECONDS))
+        .hasCauseInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void testEnqueueWithNegativeDelay() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    assertThatThrownBy(() -> db.runAsync(
+                tr -> queue.enqueue(tr, "key", "data", Duration.ofSeconds(-1), Duration.ofMinutes(5)))
+            .get(5, TimeUnit.SECONDS))
+        .hasCauseInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void testEnqueueWithNegativeTtl() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    assertThatThrownBy(
+            () -> db.runAsync(tr -> queue.enqueue(tr, "key", "data", Duration.ZERO, Duration.ofSeconds(-1)))
+                .get(5, TimeUnit.SECONDS))
+        .hasCauseInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void testEnqueueWithZeroTtl() throws ExecutionException, InterruptedException, TimeoutException {
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    assertThatThrownBy(() -> db.runAsync(tr -> queue.enqueue(tr, "key", "data", Duration.ZERO, Duration.ZERO))
+            .get(5, TimeUnit.SECONDS))
+        .hasCauseInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void testTaskClaimToString() throws ExecutionException, InterruptedException, TimeoutException {
+    simulatedTime.set(1000);
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    queue.enqueue("myKey", "myTask").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    String str = claim.toString();
+    assertThat(str).contains("TaskClaim{");
+    assertThat(str).contains("taskUuid=");
+    assertThat(str).contains("taskName=myTask");
+    assertThat(str).contains("taskKey=myKey");
+    assertThat(str).contains("attempts=1");
+    assertThat(str).contains("claimUuid=");
+    assertThat(str).contains("expirationTime=");
+
+    claim.complete().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testTaskClaimConvenienceGetters() throws ExecutionException, InterruptedException, TimeoutException {
+    simulatedTime.set(1000);
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+    queue.enqueue("key1", "data1").get(5, TimeUnit.SECONDS);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+
+    assertThat(claim.getTaskUuid()).isNotNull();
+    assertThat(claim.getClaimUuid()).isNotNull();
+    assertThat(claim.getCreationTime()).isNotNull();
+    assertThat(claim.getExpectedExecutionTime()).isNotNull();
+    assertThat(claim.getExpirationTime()).isNotNull();
+    assertThat(claim.getTtl()).isPositive();
+    assertThat(claim.getThrottle()).isNotNull();
+    assertThat(claim.getTimeUntilExpiration()).isNotNull();
+    assertThat(claim.isExpired()).isFalse();
+
+    // Move time past expiration to test expired path
+    simulatedTime.set(1000 + Duration.ofMinutes(10).toMillis());
+    assertThat(claim.isExpired()).isTrue();
+    assertThat(claim.getTimeUntilExpiration()).isEqualTo(Duration.ZERO);
+
+    claim.complete().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testStandaloneEnqueueWithDelay() throws ExecutionException, InterruptedException, TimeoutException {
+    simulatedTime.set(1000);
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Test the default method enqueue(K, T, Duration) - standalone with delay
+    queue.enqueue("key1", "data1", Duration.ofSeconds(5)).get(5, TimeUnit.SECONDS);
+
+    // Task should not be visible yet
+    assertThat(db.runAsync(tr -> queue.hasVisibleUnclaimedTasks(tr)).get(5, TimeUnit.SECONDS))
+        .isFalse();
+
+    // Advance time past delay
+    simulatedTime.set(1000 + 6000);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim.task()).isEqualTo("data1");
+    claim.complete().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testStandaloneEnqueueWithDelayAndTtl() throws ExecutionException, InterruptedException, TimeoutException {
+    simulatedTime.set(1000);
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Test the default method enqueue(K, T, Duration, Duration) - standalone with delay and ttl
+    queue.enqueue("key1", "data1", Duration.ofSeconds(1), Duration.ofMinutes(10))
+        .get(5, TimeUnit.SECONDS);
+
+    simulatedTime.set(2000);
+    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    assertThat(claim.task()).isEqualTo("data1");
+    claim.complete().get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testEnqueueIfNotExistsDefaultOverloads() throws ExecutionException, InterruptedException, TimeoutException {
+    simulatedTime.set(1000);
+    var queue = KeyedTaskQueue.createOrOpen(config, db).get();
+
+    // Test enqueueIfNotExists(tr, key, task) - 3-arg overload
+    db.runAsync(tr -> queue.enqueueIfNotExists(tr, "key1", "data1")).get(5, TimeUnit.SECONDS);
+
+    // Test enqueueIfNotExists(tr, key, task, delay) - 4-arg overload
+    db.runAsync(tr -> queue.enqueueIfNotExists(tr, "key2", "data2", Duration.ZERO))
+        .get(5, TimeUnit.SECONDS);
+
+    // Test enqueueIfNotExists(tr, key, task, delay, ttl) - 5-arg overload
+    db.runAsync(tr -> queue.enqueueIfNotExists(tr, "key3", "data3", Duration.ZERO, Duration.ofMinutes(5)))
+        .get(5, TimeUnit.SECONDS);
+
+    // Test enqueueIfNotExists(key, task) - standalone 2-arg overload
+    queue.enqueueIfNotExists("key4", "data4").get(5, TimeUnit.SECONDS);
+
+    // Test enqueueIfNotExists(key, task, delay, ttl, enqueueIfAlreadyRunning) - standalone 5-arg overload
+    queue.enqueueIfNotExists("key5", "data5", Duration.ZERO, Duration.ofMinutes(5), false)
+        .get(5, TimeUnit.SECONDS);
+
+    // Clean up
+    for (int i = 0; i < 5; i++) {
+      var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+      claim.complete().get(5, TimeUnit.SECONDS);
+    }
+  }
+
+  @Test
+  void testTaskQueueExceptionWithCause() {
+    var cause = new RuntimeException("root cause");
+    var ex = new TaskQueueException("message", cause);
+    assertThat(ex.getMessage()).isEqualTo("message");
+    assertThat(ex.getCause()).isEqualTo(cause);
+  }
+
+  @Test
+  void testStringSerializerNullHandling() {
+    var serializer = new StringSerializer();
+
+    // Serialize null should return EMPTY
+    var serialized = serializer.serialize(null);
+    assertThat(serialized).isEqualTo(ByteString.EMPTY);
+
+    // Deserialize null should return null
+    var deserialized = serializer.deserialize(null);
+    assertThat(deserialized).isNull();
+
+    // Deserialize empty should return null
+    var deserializedEmpty = serializer.deserialize(ByteString.EMPTY);
+    assertThat(deserializedEmpty).isNull();
+
+    // Round-trip with non-null value
+    var roundTrip = serializer.deserialize(serializer.serialize("hello"));
+    assertThat(roundTrip).isEqualTo("hello");
+  }
+
   private void assertUpDownCounterValue(Collection<MetricData> metrics, String metricName, long expectedValue) {
     var metricOpt =
         metrics.stream().filter(m -> m.getName().equals(metricName)).findFirst();
