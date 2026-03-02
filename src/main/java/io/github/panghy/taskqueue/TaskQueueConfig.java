@@ -167,9 +167,9 @@ public class TaskQueueConfig<K, T> {
   }
 
   public static class Builder<K, T> {
-    public Function<T, String> taskNameExtractor = Object::toString;
-    public int estimatedWorkerCount = 1;
-    public Database database;
+    private Function<T, String> taskNameExtractor = Object::toString;
+    private int estimatedWorkerCount = 1;
+    private Database database;
     private InstantSource instantSource = InstantSource.system();
     private Directory directory;
     private Duration defaultTtl = Duration.ofMinutes(5);
