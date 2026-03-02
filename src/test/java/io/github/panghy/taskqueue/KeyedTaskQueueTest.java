@@ -2093,21 +2093,26 @@ public class KeyedTaskQueueTest {
         .build();
     var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
 
-    queue.enqueue("redrive-key", "redrive-data").get(5, TimeUnit.SECONDS);
+    // Add two tasks to DLQ so the async iterator must scan past the first entry
+    queue.enqueue("redrive-key-1", "redrive-data-1").get(5, TimeUnit.SECONDS);
+    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    claim1.fail("test failure 1").get(5, TimeUnit.SECONDS);
 
-    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
-    claim.fail("test failure").get(5, TimeUnit.SECONDS);
+    simulatedTime.addAndGet(1000);
+    queue.enqueue("redrive-key-2", "redrive-data-2").get(5, TimeUnit.SECONDS);
+    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+    claim2.fail("test failure 2").get(5, TimeUnit.SECONDS);
+
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+
+    // Redrive the second key (iterator must skip past the first entry)
+    queue.redriveFromDlq("redrive-key-2").get(5, TimeUnit.SECONDS);
 
     assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
 
-    // Redrive by key
-    queue.redriveFromDlq("redrive-key").get(5, TimeUnit.SECONDS);
-
-    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
-
     // Task should be immediately claimable with attempts representing the first attempt after redrive
     var redriven = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
-    assertThat(redriven.task()).isEqualTo("redrive-data");
+    assertThat(redriven.task()).isEqualTo("redrive-data-2");
     assertThat(redriven.taskProto().getAttempts())
         .isEqualTo(1); // first attempt after redrive (counter reset on enqueue, incremented on claim)
     redriven.complete().get(5, TimeUnit.SECONDS);
@@ -2210,8 +2215,9 @@ public class KeyedTaskQueueTest {
         .build();
     var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
 
-    // Add 3 tasks to DLQ
+    // Add 3 tasks to DLQ with advancing time between each failure
     for (int i = 1; i <= 3; i++) {
+      simulatedTime.addAndGet(1000); // Advance time by 1 second between failures
       queue.enqueue("list-key-" + i, "list-data-" + i).get(5, TimeUnit.SECONDS);
       var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
       claim.fail("failure-" + i).get(5, TimeUnit.SECONDS);
@@ -2220,6 +2226,13 @@ public class KeyedTaskQueueTest {
     // List all
     List<DeadLetteredTask> allTasks = queue.listDlqTasks(10).get(5, TimeUnit.SECONDS);
     assertThat(allTasks).hasSize(3);
+
+    // Assert oldest-first ordering by dead_lettered_time
+    for (int i = 0; i < allTasks.size() - 1; i++) {
+      long t1 = allTasks.get(i).getDeadLetteredTime().getSeconds();
+      long t2 = allTasks.get(i + 1).getDeadLetteredTime().getSeconds();
+      assertThat(t1).isLessThan(t2);
+    }
 
     // List with limit
     List<DeadLetteredTask> limitedTasks = queue.listDlqTasks(2).get(5, TimeUnit.SECONDS);
