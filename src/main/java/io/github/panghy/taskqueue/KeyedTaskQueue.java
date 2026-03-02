@@ -39,6 +39,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
@@ -60,6 +61,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   // OpenTelemetry instrumentation - instance fields
   private final Tracer tracer;
+  @SuppressWarnings("FieldCanBeLocal")
   private final Meter meter;
   private final LongCounter tasksEnqueued;
   private final LongCounter tasksClaimed;
@@ -344,7 +346,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     return AsyncUtil.whileTrue(
             () -> {
               checkNotClosed();
-              var watchFF = db.runAsync(tr -> {
+              CompletableFuture<CompletableFuture<Void>> watchFF = db.runAsync(tr -> {
                 ref.set(null);
                 var unclaimedTaskOptF = findUnclaimedTask(tr);
                 return unclaimedTaskOptF.thenCompose(claimedTaskO -> {
@@ -384,34 +386,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                 // watchF is null if a task was found.
                 if (watchF != null) {
                   var racedWatch = raceWithClose(watchF);
-                  return nextExpirationOF.thenCompose(nextExpirationO -> {
-                    if (nextExpirationO.isPresent()) {
-                      long sleepTime =
-                          nextExpirationO.get().toEpochMilli()
-                              - config.getInstantSource()
-                                  .instant()
-                                  .toEpochMilli();
-                      if (sleepTime > 0) {
-                        return racedWatch
-                            .orTimeout(sleepTime, TimeUnit.MILLISECONDS)
-                            .exceptionally(ex -> {
-                              // Re-throw TaskQueueException (from close), swallow timeout
-                              if (ex instanceof TaskQueueException) {
-                                throw (TaskQueueException) ex;
-                              }
-                              if (ex instanceof CompletionException
-                                  && ex.getCause() instanceof TaskQueueException) {
-                                throw (TaskQueueException) ex.getCause();
-                              }
-                              return null;
-                            })
-                            .thenApply($ -> true);
-                      }
-                      watchF.cancel(true);
-                      return completedFuture(true);
-                    }
-                    return racedWatch.thenApply($ -> true);
-                  });
+                  return combineWatchAndExpiration(watchF, racedWatch, nextExpirationOF);
                 }
                 return completedFuture(false);
               });
@@ -1241,37 +1216,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                 // Find the next expiration time for claimed tasks (in case they expire and queue
                 // becomes empty)
                 var nextExpirationOF = db.runAsync(tr -> findNextExpiration(tr, claimedTasks));
-
-                return nextExpirationOF.thenCompose(nextExpirationO -> {
-                  if (nextExpirationO.isPresent()) {
-                    long sleepTime = nextExpirationO.get().toEpochMilli()
-                        - config.getInstantSource()
-                            .instant()
-                            .toEpochMilli();
-                    if (sleepTime > 0) {
-                      // Wait for either the watch to trigger or the next expiration
-                      return racedWatch
-                          .orTimeout(sleepTime, TimeUnit.MILLISECONDS)
-                          .exceptionally(ex -> {
-                            // Re-throw TaskQueueException (from close), swallow timeout
-                            if (ex instanceof TaskQueueException) {
-                              throw (TaskQueueException) ex;
-                            }
-                            if (ex instanceof CompletionException
-                                && ex.getCause() instanceof TaskQueueException) {
-                              throw (TaskQueueException) ex.getCause();
-                            }
-                            return null;
-                          })
-                          .thenApply($ -> true);
-                    }
-                    // Expiration has already passed, cancel watch and check again
-                    watchF.cancel(true);
-                    return completedFuture(true);
-                  }
-                  // No expiration time, just wait for the watch
-                  return racedWatch.thenApply($ -> true);
-                });
+                return combineWatchAndExpiration(watchF, racedWatch, nextExpirationOF);
               });
             },
             db.getExecutor())
@@ -1286,5 +1231,49 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             return null;
           }
         });
+  }
+
+  /**
+   * Returns a CompletionStage that completes with true when either the watch triggers or the next expiration time is
+   * reached.
+   *
+   * @param watchF           the CompletableFuture representing the watch
+   * @param racedWatch       a CompletableFuture that completes when either the watch triggers or the close signal is
+   *                         received
+   * @param nextExpirationOF a CompletableFuture that completes with the next expiration time of claimed tasks, if any
+   * @return a CompletionStage that completes with true when either the watch triggers or the next expiration time is
+   * reached.
+   */
+  private CompletionStage<Boolean> combineWatchAndExpiration(
+      CompletableFuture<Void> watchF,
+      CompletableFuture<Void> racedWatch,
+      CompletableFuture<Optional<Instant>> nextExpirationOF) {
+    return nextExpirationOF.thenCompose(nextExpirationO -> {
+      if (nextExpirationO.isPresent()) {
+        long sleepTime = nextExpirationO.get().toEpochMilli()
+            - config.getInstantSource().instant().toEpochMilli();
+        if (sleepTime > 0) {
+          // Wait for either the watch to trigger or the next expiration
+          return racedWatch
+              .orTimeout(sleepTime, TimeUnit.MILLISECONDS)
+              .exceptionally(ex -> {
+                // Re-throw TaskQueueException (from close), swallow timeout
+                if (ex instanceof TaskQueueException) {
+                  throw (TaskQueueException) ex;
+                }
+                if (ex instanceof CompletionException && ex.getCause() instanceof TaskQueueException) {
+                  throw (TaskQueueException) ex.getCause();
+                }
+                return null;
+              })
+              .thenApply($ -> true);
+        }
+        // Expiration has already passed, cancel watch and check again
+        watchF.cancel(true);
+        return completedFuture(true);
+      }
+      // No expiration time, just wait for the watch
+      return racedWatch.thenApply($ -> true);
+    });
   }
 }
