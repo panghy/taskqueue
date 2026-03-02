@@ -338,4 +338,72 @@ class SimpleTaskQueueWrapperTest {
     TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
     taskQueue.completeTask(claim).get();
   }
+
+  @Test
+  void testHasClaimedTasks() throws ExecutionException, InterruptedException, TimeoutException {
+    // Initially no claimed tasks
+    assertThat(taskQueue.hasClaimedTasks().get(5, TimeUnit.SECONDS)).isFalse();
+
+    // Enqueue and claim a task
+    taskQueue.enqueue("claimed-task").get();
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+
+    // Now should have claimed tasks
+    assertThat(taskQueue.hasClaimedTasks().get(5, TimeUnit.SECONDS)).isTrue();
+
+    // Complete and verify
+    taskQueue.completeTask(claim).get();
+    assertThat(taskQueue.hasClaimedTasks().get(5, TimeUnit.SECONDS)).isFalse();
+  }
+
+  @Test
+  void testAwaitQueueEmpty() throws ExecutionException, InterruptedException, TimeoutException {
+    // Empty queue should complete immediately
+    taskQueue.awaitQueueEmpty().get(5, TimeUnit.SECONDS);
+
+    // Enqueue a task
+    taskQueue.enqueue("task-for-empty").get();
+
+    // Start awaiting empty in background
+    CompletableFuture<Void> emptyFuture = taskQueue.awaitQueueEmpty();
+    assertThat(emptyFuture.isDone()).isFalse();
+
+    // Claim and complete the task
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+    taskQueue.completeTask(claim).get();
+
+    // Now the queue should become empty
+    emptyFuture.get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testClose() throws ExecutionException, InterruptedException, TimeoutException {
+    // Close should be idempotent
+    taskQueue.close();
+    taskQueue.close();
+
+    // After close, awaitAndClaimTask should fail
+    assertThatThrownBy(() -> taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS))
+        .isInstanceOfAny(TaskQueueException.class, ExecutionException.class);
+  }
+
+  @Test
+  void testStandaloneEnqueueWithDelay() throws ExecutionException, InterruptedException, TimeoutException {
+    // Test the default method enqueue(T, Duration) - standalone with delay
+    taskQueue.enqueue("delayed-task", Duration.ZERO).get(5, TimeUnit.SECONDS);
+
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+    assertThat(claim.task()).isEqualTo("delayed-task");
+    taskQueue.completeTask(claim).get();
+  }
+
+  @Test
+  void testStandaloneEnqueueWithDelayAndTtl() throws ExecutionException, InterruptedException, TimeoutException {
+    // Test the default method enqueue(T, Duration, Duration) - standalone with delay and ttl
+    taskQueue.enqueue("ttl-task", Duration.ZERO, Duration.ofMinutes(10)).get(5, TimeUnit.SECONDS);
+
+    TaskClaim<UUID, String> claim = taskQueue.awaitAndClaimTask().get();
+    assertThat(claim.task()).isEqualTo("ttl-task");
+    taskQueue.completeTask(claim).get();
+  }
 }

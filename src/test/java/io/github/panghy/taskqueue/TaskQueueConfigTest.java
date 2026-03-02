@@ -111,4 +111,20 @@ class TaskQueueConfigTest {
         .defaultThrottle(Duration.ofSeconds(-1))
         .build());
   }
+
+  @Test
+  void testInvalidEstimatedWorkerCountZero() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .estimatedWorkerCount(0)
+        .build());
+  }
+
+  @Test
+  void testInvalidEstimatedWorkerCountNegative() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .estimatedWorkerCount(-1)
+        .build());
+  }
 }
