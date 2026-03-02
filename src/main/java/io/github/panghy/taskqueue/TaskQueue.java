@@ -2,8 +2,10 @@ package io.github.panghy.taskqueue;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Transaction;
+import io.github.panghy.taskqueue.proto.DeadLetteredTask;
 import io.github.panghy.taskqueue.proto.TaskKeyMetadata;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 
@@ -204,22 +206,49 @@ public interface TaskQueue<K, T> {
 
   /**
    * Fails the task. This will cause the task to be retried at the current known highest version.
+   * Uses a standalone transaction.
    *
    * @param taskClaim The task claim.
    * @return A future that completes when the task has been failed.
    */
   default CompletableFuture<Void> failTask(TaskClaim<K, T> taskClaim) {
-    return runAsync(tr -> failTask(tr, taskClaim));
+    return runAsync(tr -> failTask(tr, taskClaim, null));
   }
 
   /**
-   * Fails the task. This will cause the task to be retried at the current known highest version.
+   * Fails the task with a failure reason. This will cause the task to be retried at the current known highest version.
+   * Uses a standalone transaction.
+   *
+   * @param taskClaim     The task claim.
+   * @param failureReason The reason for the failure (may be null).
+   * @return A future that completes when the task has been failed.
+   */
+  default CompletableFuture<Void> failTask(TaskClaim<K, T> taskClaim, String failureReason) {
+    return runAsync(tr -> failTask(tr, taskClaim, failureReason));
+  }
+
+  /**
+   * Fails the task within an existing transaction. This will cause the task to be retried at the current known
+   * highest version.
    *
    * @param tr        The transaction to use for the operation.
    * @param taskClaim The task claim.
    * @return A future that completes when the task has been failed.
    */
-  CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim);
+  default CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim) {
+    return failTask(tr, taskClaim, null);
+  }
+
+  /**
+   * Fails the task within an existing transaction with a failure reason. This will cause the task to be retried
+   * at the current known highest version.
+   *
+   * @param tr            The transaction to use for the operation.
+   * @param taskClaim     The task claim.
+   * @param failureReason The reason for the failure (may be null).
+   * @return A future that completes when the task has been failed.
+   */
+  CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim, String failureReason);
 
   /**
    * Extends the TTL for a claimed task. This allows a worker to request more time to process a task.
@@ -324,4 +353,102 @@ public interface TaskQueue<K, T> {
    * @return A future that completes when the queue is empty.
    */
   CompletableFuture<Void> awaitQueueEmpty(Database db);
+
+  // ---- Dead Letter Queue (DLQ) methods ----
+
+  /**
+   * Redrives a specific task from the dead letter queue back to the main queue by task key.
+   * Uses a standalone transaction.
+   *
+   * @param taskKey The key of the task to redrive.
+   * @return A future that completes when the task has been redriven.
+   */
+  default CompletableFuture<Void> redriveFromDlq(K taskKey) {
+    return runAsync(tr -> redriveFromDlq(tr, taskKey));
+  }
+
+  /**
+   * Redrives a specific task from the dead letter queue back to the main queue by task key.
+   *
+   * @param tr      The transaction to use for the operation.
+   * @param taskKey The key of the task to redrive.
+   * @return A future that completes when the task has been redriven.
+   */
+  CompletableFuture<Void> redriveFromDlq(Transaction tr, K taskKey);
+
+  /**
+   * Redrives up to {@code count} tasks from the dead letter queue back to the main queue.
+   * Uses a standalone transaction.
+   *
+   * @param count The maximum number of tasks to redrive.
+   * @return A future that completes with the number of tasks actually redriven.
+   */
+  default CompletableFuture<Integer> redriveFromDlq(int count) {
+    return runAsync(tr -> redriveFromDlq(tr, count));
+  }
+
+  /**
+   * Redrives up to {@code count} tasks from the dead letter queue back to the main queue.
+   *
+   * @param tr    The transaction to use for the operation.
+   * @param count The maximum number of tasks to redrive.
+   * @return A future that completes with the number of tasks actually redriven.
+   */
+  CompletableFuture<Integer> redriveFromDlq(Transaction tr, int count);
+
+  /**
+   * Purges all tasks from the dead letter queue.
+   * Uses a standalone transaction.
+   *
+   * @return A future that completes when the DLQ has been purged.
+   */
+  default CompletableFuture<Void> purgeDlq() {
+    return runAsync(this::purgeDlq);
+  }
+
+  /**
+   * Purges all tasks from the dead letter queue.
+   *
+   * @param tr The transaction to use for the operation.
+   * @return A future that completes when the DLQ has been purged.
+   */
+  CompletableFuture<Void> purgeDlq(Transaction tr);
+
+  /**
+   * Gets the number of tasks in the dead letter queue.
+   * Uses a standalone transaction.
+   *
+   * @return A future that completes with the number of tasks in the DLQ.
+   */
+  default CompletableFuture<Long> getDlqSize() {
+    return runAsync(this::getDlqSize);
+  }
+
+  /**
+   * Gets the number of tasks in the dead letter queue.
+   *
+   * @param tr The transaction to use for the operation.
+   * @return A future that completes with the number of tasks in the DLQ.
+   */
+  CompletableFuture<Long> getDlqSize(Transaction tr);
+
+  /**
+   * Lists tasks in the dead letter queue, ordered oldest first.
+   * Uses a standalone transaction.
+   *
+   * @param limit The maximum number of tasks to return.
+   * @return A future that completes with a list of dead-lettered tasks.
+   */
+  default CompletableFuture<List<DeadLetteredTask>> listDlqTasks(int limit) {
+    return runAsync(tr -> listDlqTasks(tr, limit));
+  }
+
+  /**
+   * Lists tasks in the dead letter queue, ordered oldest first.
+   *
+   * @param tr    The transaction to use for the operation.
+   * @param limit The maximum number of tasks to return.
+   * @return A future that completes with a list of dead-lettered tasks.
+   */
+  CompletableFuture<List<DeadLetteredTask>> listDlqTasks(Transaction tr, int limit);
 }

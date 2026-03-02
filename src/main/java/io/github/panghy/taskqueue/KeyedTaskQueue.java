@@ -17,6 +17,7 @@ import com.apple.foundationdb.tuple.Tuple;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Timestamp;
+import io.github.panghy.taskqueue.proto.DeadLetteredTask;
 import io.github.panghy.taskqueue.proto.Task;
 import io.github.panghy.taskqueue.proto.TaskKey;
 import io.github.panghy.taskqueue.proto.TaskKeyMetadata;
@@ -64,6 +65,9 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   private final LongCounter tasksClaimed;
   private final LongCounter tasksCompleted;
   private final LongCounter tasksFailed;
+  private final LongCounter dlqAdded;
+  private final LongCounter dlqRedriven;
+  private final LongCounter dlqPurged;
   private final LongHistogram taskProcessingDuration;
   private final LongHistogram taskWaitTime;
 
@@ -80,6 +84,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   private final DirectorySubspace unclaimedTasks;
   private final DirectorySubspace claimedTasks;
   private final DirectorySubspace taskKeys;
+  private final DirectorySubspace dlqTasks;
   private final byte[] watchKey;
   private final String queuePath;
 
@@ -91,11 +96,13 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
       DirectorySubspace unclaimedTasks,
       DirectorySubspace claimedTasks,
       DirectorySubspace taskKeys,
+      DirectorySubspace dlqTasks,
       byte[] watchKey) {
     this.config = config;
     this.unclaimedTasks = unclaimedTasks;
     this.claimedTasks = claimedTasks;
     this.taskKeys = taskKeys;
+    this.dlqTasks = dlqTasks;
     this.watchKey = watchKey;
 
     // Get the queue path from the directory
@@ -126,6 +133,21 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .setUnit("tasks")
         .build();
 
+    this.dlqAdded = meter.counterBuilder("taskqueue.dlq.added")
+        .setDescription("Number of tasks added to the dead letter queue")
+        .setUnit("tasks")
+        .build();
+
+    this.dlqRedriven = meter.counterBuilder("taskqueue.dlq.redriven")
+        .setDescription("Number of tasks redriven from the dead letter queue")
+        .setUnit("tasks")
+        .build();
+
+    this.dlqPurged = meter.counterBuilder("taskqueue.dlq.purged")
+        .setDescription("Number of tasks purged from the dead letter queue")
+        .setUnit("tasks")
+        .build();
+
     this.taskProcessingDuration = meter.histogramBuilder("taskqueue.task.processing.duration")
         .setDescription("Duration of task processing")
         .setUnit("ms")
@@ -153,15 +175,17 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     var unclaimedTaskF = config.getDirectory().createOrOpen(context, List.of("unclaimed_tasks"));
     var claimedTaskF = config.getDirectory().createOrOpen(context, List.of("claimed_tasks"));
     var taskKeyF = config.getDirectory().createOrOpen(context, List.of("task_keys"));
+    var dlqF = config.getDirectory().createOrOpen(context, List.of("dlq"));
     var watchKeyF =
         config.getDirectory().createOrOpen(context, List.of("watch")).thenApply(Subspace::getKey);
     var watchKeyWriteF = watchKeyF.thenAccept(watchKey -> context.run(tr -> {
       tr.set(watchKey, ONE);
       return null;
     }));
-    return allOf(unclaimedTaskF, claimedTaskF, taskKeyF, watchKeyF, watchKeyWriteF)
+    return allOf(unclaimedTaskF, claimedTaskF, taskKeyF, dlqF, watchKeyF, watchKeyWriteF)
         .thenApply(v -> new KeyedTaskQueue<>(
-            config, unclaimedTaskF.join(), claimedTaskF.join(), taskKeyF.join(), watchKeyF.join()));
+            config, unclaimedTaskF.join(), claimedTaskF.join(), taskKeyF.join(), dlqF.join(),
+            watchKeyF.join()));
   }
 
   @Override
@@ -577,7 +601,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   }
 
   @Override
-  public CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim) {
+  public CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim, String failureReason) {
     Span span = tracer.spanBuilder("taskqueue.failTask")
         .setSpanKind(SpanKind.INTERNAL)
         .setAttribute(TASK_UUID, taskClaim.getTaskUuid().toString())
@@ -1169,5 +1193,30 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             return null;
           }
         });
+  }
+
+  @Override
+  public CompletableFuture<Void> redriveFromDlq(Transaction tr, K taskKey) {
+    throw new UnsupportedOperationException("DLQ redrive not yet implemented");
+  }
+
+  @Override
+  public CompletableFuture<Integer> redriveFromDlq(Transaction tr, int count) {
+    throw new UnsupportedOperationException("DLQ redrive not yet implemented");
+  }
+
+  @Override
+  public CompletableFuture<Void> purgeDlq(Transaction tr) {
+    throw new UnsupportedOperationException("DLQ purge not yet implemented");
+  }
+
+  @Override
+  public CompletableFuture<Long> getDlqSize(Transaction tr) {
+    throw new UnsupportedOperationException("DLQ size not yet implemented");
+  }
+
+  @Override
+  public CompletableFuture<List<DeadLetteredTask>> listDlqTasks(Transaction tr, int limit) {
+    throw new UnsupportedOperationException("DLQ list not yet implemented");
   }
 }
