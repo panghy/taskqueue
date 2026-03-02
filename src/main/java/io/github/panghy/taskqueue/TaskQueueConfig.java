@@ -89,6 +89,15 @@ public class TaskQueueConfig<K, T> {
   @Getter
   private final InstantSource instantSource;
 
+  /**
+   * -- GETTER --
+   * Gets whether the dead letter queue is enabled for this task queue.
+   * When enabled, tasks that exceed maxAttempts will be moved to a DLQ
+   * instead of being discarded.
+   */
+  @Getter
+  private final boolean dlqEnabled;
+
   private TaskQueueConfig(Builder<K, T> builder) {
     this.database = Objects.requireNonNull(builder.database, "database must not be null");
     this.directory = Objects.requireNonNull(builder.directory, "subspace must not be null");
@@ -101,6 +110,7 @@ public class TaskQueueConfig<K, T> {
         Objects.requireNonNull(builder.taskNameExtractor, "taskNameExtractor must not be null");
     this.estimatedWorkerCount = builder.estimatedWorkerCount;
     this.instantSource = Objects.requireNonNull(builder.instantSource, "instantSource must not be null");
+    this.dlqEnabled = builder.dlqEnabled;
 
     if (maxAttempts <= 0) {
       throw new IllegalArgumentException("maxAttempts must be positive");
@@ -177,6 +187,7 @@ public class TaskQueueConfig<K, T> {
     private Duration defaultThrottle = Duration.ofSeconds(1);
     private TaskSerializer<K> keySerializer;
     private TaskSerializer<T> taskSerializer;
+    private boolean dlqEnabled = false;
 
     private Builder(
         Database database,
@@ -262,6 +273,16 @@ public class TaskQueueConfig<K, T> {
      */
     public Builder<K, T> taskSerializer(TaskSerializer<T> taskSerializer) {
       this.taskSerializer = taskSerializer;
+      return this;
+    }
+
+    /**
+     * Sets whether the dead letter queue is enabled.
+     * When enabled, tasks that exceed maxAttempts will be moved to a DLQ.
+     * Default: false
+     */
+    public Builder<K, T> dlqEnabled(boolean dlqEnabled) {
+      this.dlqEnabled = dlqEnabled;
       return this;
     }
 
