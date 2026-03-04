@@ -648,18 +648,18 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                   taskClaim.taskProto().getAttempts());
               if (config.isDlqEnabled()) {
                 // Move to dead letter queue.
+                Instant deadLetteredInstant =
+                    config.getInstantSource().instant();
                 DeadLetteredTask dlqEntry = DeadLetteredTask.newBuilder()
                     .setTaskUuid(taskClaim.taskProto().getTaskUuid())
                     .setTaskKey(taskKeyBytes)
                     .setTask(taskClaim.taskKeyProto().getTask())
                     .setCreationTime(taskClaim.taskProto().getCreationTime())
-                    .setDeadLetteredTime(fromJavaTimestamp(
-                        config.getInstantSource().instant()))
+                    .setDeadLetteredTime(fromJavaTimestamp(deadLetteredInstant))
                     .setFailureReason(failureReason != null ? failureReason : "")
                     .setAttempts(taskClaim.taskProto().getAttempts())
                     .build();
-                long deadLetteredTimeMillis =
-                    config.getInstantSource().instant().toEpochMilli();
+                long deadLetteredTimeMillis = deadLetteredInstant.toEpochMilli();
                 tr.set(
                     dlqTasks.pack(Tuple.from(
                         deadLetteredTimeMillis,
