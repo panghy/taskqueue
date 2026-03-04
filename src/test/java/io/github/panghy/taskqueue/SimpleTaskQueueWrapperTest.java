@@ -483,4 +483,35 @@ class SimpleTaskQueueWrapperTest {
     assertThat(dlqTasks).hasSize(1);
     assertThat(dlqTasks.get(0).getFailureReason()).isEmpty();
   }
+
+  @Test
+  void testBatchedRedrive() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .dlqRedriveBatchSize(2)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    // Add 5 tasks to DLQ
+    for (int i = 1; i <= 5; i++) {
+      dlqQueue.enqueue("batch-task-" + i).get(5, TimeUnit.SECONDS);
+      var claim = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+      dlqQueue.failTask(claim).get(5, TimeUnit.SECONDS);
+    }
+
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(5);
+
+    // Redrive all 5 — with batch size 2, this should use 3 transactions (2+2+1)
+    int redriven = dlqQueue.redriveFromDlq(5).get(5, TimeUnit.SECONDS);
+    assertThat(redriven).isEqualTo(5);
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+
+    // All 5 tasks should be claimable
+    for (int i = 0; i < 5; i++) {
+      var claim = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+      dlqQueue.completeTask(claim).get(5, TimeUnit.SECONDS);
+    }
+  }
 }

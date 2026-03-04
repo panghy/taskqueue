@@ -357,34 +357,26 @@ public interface TaskQueue<K, T> {
   // ---- Dead Letter Queue (DLQ) methods ----
 
   /**
-   * Redrives a specific task from the dead letter queue back to the main queue by task key.
-   * Uses a standalone transaction.
-   *
-   * @param taskKey The key of the task to redrive.
-   * @return A future that completes when the task has been redriven.
-   */
-  default CompletableFuture<Void> redriveFromDlq(K taskKey) {
-    return runAsync(tr -> redriveFromDlq(tr, taskKey));
-  }
-
-  /**
-   * Redrives a specific task from the dead letter queue back to the main queue by task key.
-   *
-   * @param tr      The transaction to use for the operation.
-   * @param taskKey The key of the task to redrive.
-   * @return A future that completes when the task has been redriven.
-   */
-  CompletableFuture<Void> redriveFromDlq(Transaction tr, K taskKey);
-
-  /**
    * Redrives up to {@code count} tasks from the dead letter queue back to the main queue.
-   * Uses a standalone transaction.
+   * Uses multiple standalone transactions, each processing up to {@code dlqRedriveBatchSize} tasks,
+   * to avoid exceeding FoundationDB transaction limits for large redrives.
    *
    * @param count The maximum number of tasks to redrive.
    * @return A future that completes with the number of tasks actually redriven.
    */
   default CompletableFuture<Integer> redriveFromDlq(int count) {
-    return runAsync(tr -> redriveFromDlq(tr, count));
+    int batchSize = getConfig().getDlqRedriveBatchSize();
+    java.util.concurrent.atomic.AtomicInteger totalRedriven = new java.util.concurrent.atomic.AtomicInteger(0);
+    java.util.concurrent.atomic.AtomicInteger remaining = new java.util.concurrent.atomic.AtomicInteger(count);
+    return com.apple.foundationdb.async.AsyncUtil.whileTrue(() -> {
+          int thisBatch = Math.min(remaining.get(), batchSize);
+          return runAsync(tr -> redriveFromDlq(tr, thisBatch)).thenApply(redriven -> {
+            totalRedriven.addAndGet(redriven);
+            remaining.addAndGet(-redriven);
+            return redriven > 0 && remaining.get() > 0;
+          });
+        })
+        .thenApply(v -> totalRedriven.get());
   }
 
   /**

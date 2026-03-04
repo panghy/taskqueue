@@ -80,11 +80,6 @@ public class SimpleTaskQueueWrapper<T> implements SimpleTaskQueue<T> {
   }
 
   @Override
-  public CompletableFuture<Void> redriveFromDlq(Transaction tr, UUID taskKey) {
-    return taskQueue.redriveFromDlq(tr, taskKey);
-  }
-
-  @Override
   public CompletableFuture<Integer> redriveFromDlq(Transaction tr, int count) {
     return taskQueue.redriveFromDlq(tr, count);
   }
