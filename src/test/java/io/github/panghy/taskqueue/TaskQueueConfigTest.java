@@ -142,4 +142,39 @@ class TaskQueueConfigTest {
 
     assertFalse(config.isDlqEnabled());
   }
+
+  @Test
+  void testDlqRedriveBatchSizeDefault() {
+    TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .build();
+
+    assertEquals(100, config.getDlqRedriveBatchSize());
+  }
+
+  @Test
+  void testDlqRedriveBatchSizeCustom() {
+    TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .dlqRedriveBatchSize(50)
+        .build();
+
+    assertEquals(50, config.getDlqRedriveBatchSize());
+  }
+
+  @Test
+  void testDlqRedriveBatchSizeZeroThrows() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .dlqRedriveBatchSize(0)
+        .build());
+  }
+
+  @Test
+  void testDlqRedriveBatchSizeNegativeThrows() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .dlqRedriveBatchSize(-1)
+        .build());
+  }
 }

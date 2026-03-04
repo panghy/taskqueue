@@ -2085,40 +2085,6 @@ public class KeyedTaskQueueTest {
   }
 
   @Test
-  void testRedriveFromDlqByKey() throws ExecutionException, InterruptedException, TimeoutException {
-    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
-        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
-        .maxAttempts(1)
-        .dlqEnabled(true)
-        .build();
-    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
-
-    // Add two tasks to DLQ so the async iterator must scan past the first entry
-    queue.enqueue("redrive-key-1", "redrive-data-1").get(5, TimeUnit.SECONDS);
-    var claim1 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
-    claim1.fail("test failure 1").get(5, TimeUnit.SECONDS);
-
-    simulatedTime.addAndGet(1000);
-    queue.enqueue("redrive-key-2", "redrive-data-2").get(5, TimeUnit.SECONDS);
-    var claim2 = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
-    claim2.fail("test failure 2").get(5, TimeUnit.SECONDS);
-
-    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(2);
-
-    // Redrive the second key (iterator must skip past the first entry)
-    queue.redriveFromDlq("redrive-key-2").get(5, TimeUnit.SECONDS);
-
-    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
-
-    // Task should be immediately claimable with attempts representing the first attempt after redrive
-    var redriven = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
-    assertThat(redriven.task()).isEqualTo("redrive-data-2");
-    assertThat(redriven.taskProto().getAttempts())
-        .isEqualTo(1); // first attempt after redrive (counter reset on enqueue, incremented on claim)
-    redriven.complete().get(5, TimeUnit.SECONDS);
-  }
-
-  @Test
   void testRedriveFromDlqByCount() throws ExecutionException, InterruptedException, TimeoutException {
     var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
         .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
@@ -2240,33 +2206,6 @@ public class KeyedTaskQueueTest {
   }
 
   @Test
-  void testRedrivenTaskIsImmediatelyClaimable() throws ExecutionException, InterruptedException, TimeoutException {
-    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
-        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
-        .maxAttempts(1)
-        .dlqEnabled(true)
-        .build();
-    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
-
-    queue.enqueue("immediate-key", "immediate-data").get(5, TimeUnit.SECONDS);
-    var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
-    claim.fail().get(5, TimeUnit.SECONDS);
-
-    // Redrive
-    queue.redriveFromDlq("immediate-key").get(5, TimeUnit.SECONDS);
-
-    // Should be immediately claimable (no delay)
-    var redriven = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
-    assertThat(redriven).isNotNull();
-    assertThat(redriven.task()).isEqualTo("immediate-data");
-    assertThat(redriven.taskProto().getAttempts()).isEqualTo(1);
-
-    // Complete and verify queue is empty
-    redriven.complete().get(5, TimeUnit.SECONDS);
-    assertQueueIsEmpty(queue);
-  }
-
-  @Test
   void testFailTaskWithExplicitFailureReason() throws ExecutionException, InterruptedException, TimeoutException {
     var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
         .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
@@ -2325,15 +2264,58 @@ public class KeyedTaskQueueTest {
   }
 
   @Test
-  void testRedriveFromDlqByKey_notFound() throws ExecutionException, InterruptedException, TimeoutException {
+  void testBatchedRedrive() throws ExecutionException, InterruptedException, TimeoutException {
     var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
         .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
         .maxAttempts(1)
         .dlqEnabled(true)
+        .dlqRedriveBatchSize(2)
         .build();
     var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
-    assertThatThrownBy(() -> queue.redriveFromDlq("nonexistent-key").get(5, TimeUnit.SECONDS))
-        .hasCauseInstanceOf(TaskQueueException.class)
-        .hasMessageContaining("No DLQ entry found");
+
+    // Add 5 tasks to DLQ
+    for (int i = 1; i <= 5; i++) {
+      queue.enqueue("batch-key-" + i, "batch-data-" + i).get(5, TimeUnit.SECONDS);
+      var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+      claim.fail().get(5, TimeUnit.SECONDS);
+    }
+
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(5);
+
+    // Redrive all 5 — with batch size 2, this should use 3 transactions (2+2+1)
+    int redriven = queue.redriveFromDlq(5).get(5, TimeUnit.SECONDS);
+    assertThat(redriven).isEqualTo(5);
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+
+    // All 5 tasks should be claimable
+    for (int i = 0; i < 5; i++) {
+      var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+      claim.complete().get(5, TimeUnit.SECONDS);
+    }
+  }
+
+  @Test
+  void testBatchedRedrivePartialBatch() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.builder(db, directory, new StringSerializer(), new StringSerializer())
+        .instantSource(() -> Instant.ofEpochMilli(simulatedTime.get()))
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .dlqRedriveBatchSize(3)
+        .build();
+    var queue = KeyedTaskQueue.createOrOpen(dlqConfig, db).get();
+
+    // Add 2 tasks to DLQ
+    for (int i = 1; i <= 2; i++) {
+      queue.enqueue("partial-key-" + i, "partial-data-" + i).get(5, TimeUnit.SECONDS);
+      var claim = queue.awaitAndClaimTask(db).get(5, TimeUnit.SECONDS);
+      claim.fail().get(5, TimeUnit.SECONDS);
+    }
+
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+
+    // Request 10 but only 2 exist — should return 2
+    int redriven = queue.redriveFromDlq(10).get(5, TimeUnit.SECONDS);
+    assertThat(redriven).isEqualTo(2);
+    assertThat(queue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
   }
 }

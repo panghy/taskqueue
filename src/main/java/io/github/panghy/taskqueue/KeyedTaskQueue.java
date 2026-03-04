@@ -1226,68 +1226,6 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   }
 
   @Override
-  public CompletableFuture<Void> redriveFromDlq(Transaction tr, K taskKey) {
-    ByteString taskKeyBytes = config.getKeySerializer().serialize(taskKey);
-    byte[] taskKeyB = taskKeyBytes.toByteArray();
-    // DLQ entries are keyed by (timestamp, taskKeyBytes[, taskUuid]), so we need to scan to find the
-    // entry matching the given task key. Use an asynchronous iterator to avoid
-    // materializing the entire range into memory.
-    com.apple.foundationdb.async.AsyncIterator<KeyValue> iterator =
-        tr.getRange(dlqTasks.range()).iterator();
-    CompletableFuture<Void> resultFuture = new CompletableFuture<>();
-    redriveFromDlqScan(tr, taskKey, taskKeyB, iterator, resultFuture);
-    return resultFuture;
-  }
-
-  /**
-   * Helper method to iteratively scan the DLQ range for a matching task key and redrive it.
-   */
-  private void redriveFromDlqScan(
-      Transaction tr,
-      K taskKey,
-      byte[] taskKeyB,
-      com.apple.foundationdb.async.AsyncIterator<KeyValue> iterator,
-      CompletableFuture<Void> resultFuture) {
-    iterator.onHasNext().whenComplete((hasNext, error) -> {
-      if (error != null) {
-        resultFuture.completeExceptionally(error);
-        return;
-      }
-      if (!hasNext) {
-        resultFuture.completeExceptionally(
-            new TaskQueueException("No DLQ entry found for task key: " + taskKey));
-        return;
-      }
-      KeyValue kv = iterator.next();
-      Tuple keyTuple = dlqTasks.unpack(kv.getKey());
-      byte[] entryTaskKeyB = keyTuple.getBytes(1);
-      if (!java.util.Arrays.equals(entryTaskKeyB, taskKeyB)) {
-        // Not a match; continue scanning.
-        redriveFromDlqScan(tr, taskKey, taskKeyB, iterator, resultFuture);
-        return;
-      }
-      DeadLetteredTask dlqEntry;
-      try {
-        dlqEntry = DeadLetteredTask.parseFrom(kv.getValue());
-      } catch (InvalidProtocolBufferException e) {
-        resultFuture.completeExceptionally(new TaskQueueException("Failed to parse DLQ entry", e));
-        return;
-      }
-      // Re-enqueue the task with attempts=0 and immediate visibility.
-      T task = config.getTaskSerializer().deserialize(dlqEntry.getTask());
-      tr.clear(kv.getKey());
-      dlqRedriven.add(1, Attributes.of(QUEUE_PATH, queuePath));
-      enqueue(tr, taskKey, task, Duration.ZERO, config.getDefaultTtl()).whenComplete((v, enqueueError) -> {
-        if (enqueueError != null) {
-          resultFuture.completeExceptionally(enqueueError);
-        } else {
-          resultFuture.complete(null);
-        }
-      });
-    });
-  }
-
-  @Override
   public CompletableFuture<Integer> redriveFromDlq(Transaction tr, int count) {
     if (count < 0) {
       throw new IllegalArgumentException("count must be non-negative, but was " + count);
