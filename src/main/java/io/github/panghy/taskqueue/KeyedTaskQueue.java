@@ -175,6 +175,52 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         .setUnit("ms")
         .ofLongs()
         .build();
+
+    // Register observable gauges for queue depth metrics
+    Attributes gaugeAttributes = Attributes.of(QUEUE_PATH, queuePath);
+
+    meter.gaugeBuilder("taskqueue.queue.unclaimed")
+        .setDescription("Current number of unclaimed tasks in the queue")
+        .setUnit("tasks")
+        .ofLongs()
+        .buildWithCallback(measurement -> {
+          long value = config.getDatabase()
+              .run(tr -> readCounter(tr, unclaimedCounterKey).join());
+          measurement.record(value, gaugeAttributes);
+        });
+
+    meter.gaugeBuilder("taskqueue.queue.claimed")
+        .setDescription("Current number of claimed (in-flight) tasks")
+        .setUnit("tasks")
+        .ofLongs()
+        .buildWithCallback(measurement -> {
+          long value = config.getDatabase()
+              .run(tr -> readCounter(tr, claimedCounterKey).join());
+          measurement.record(value, gaugeAttributes);
+        });
+
+    meter.gaugeBuilder("taskqueue.queue.depth")
+        .setDescription("Total queue depth (unclaimed + claimed)")
+        .setUnit("tasks")
+        .ofLongs()
+        .buildWithCallback(measurement -> {
+          long value = config.getDatabase().run(tr -> {
+            long unclaimed = readCounter(tr, unclaimedCounterKey).join();
+            long claimed = readCounter(tr, claimedCounterKey).join();
+            return unclaimed + claimed;
+          });
+          measurement.record(value, gaugeAttributes);
+        });
+
+    meter.gaugeBuilder("taskqueue.queue.dlq")
+        .setDescription("Current number of tasks in the dead letter queue")
+        .setUnit("tasks")
+        .ofLongs()
+        .buildWithCallback(measurement -> {
+          long value = config.getDatabase()
+              .run(tr -> readCounter(tr, dlqCounterKey).join());
+          measurement.record(value, gaugeAttributes);
+        });
   }
 
   /**
@@ -1375,10 +1421,22 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   @Override
   public CompletableFuture<Long> getDlqSize(Transaction tr) {
-    // Note: this reads the entire DLQ range into memory. For very large DLQs,
-    // this may be slow and risk transaction size limits. A stored counter could
-    // be used instead if this becomes a bottleneck.
-    return tr.getRange(dlqTasks.range()).asList().thenApply(kvs -> (long) kvs.size());
+    return readCounter(tr, dlqCounterKey);
+  }
+
+  @Override
+  public CompletableFuture<Long> getUnclaimedCount(Transaction tr) {
+    return readCounter(tr, unclaimedCounterKey);
+  }
+
+  @Override
+  public CompletableFuture<Long> getClaimedCount(Transaction tr) {
+    return readCounter(tr, claimedCounterKey);
+  }
+
+  @Override
+  public CompletableFuture<Long> getQueueDepth(Transaction tr) {
+    return readCounter(tr, unclaimedCounterKey).thenCombine(readCounter(tr, claimedCounterKey), Long::sum);
   }
 
   @Override

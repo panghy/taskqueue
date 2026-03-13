@@ -215,6 +215,10 @@ The following metrics are automatically collected:
 - `taskqueue.tasks.failed` - Counter of failed tasks
 - `taskqueue.task.processing.duration` - Histogram of task processing time (ms)
 - `taskqueue.task.wait.time` - Histogram of time tasks wait before being claimed (ms)
+- `taskqueue.queue.unclaimed` - Gauge of current unclaimed tasks in the queue
+- `taskqueue.queue.claimed` - Gauge of current claimed (in-flight) tasks
+- `taskqueue.queue.depth` - Gauge of total queue depth (unclaimed + claimed)
+- `taskqueue.queue.dlq` - Gauge of current tasks in the dead letter queue
 
 ### Setup
 
