@@ -514,4 +514,176 @@ class SimpleTaskQueueWrapperTest {
       dlqQueue.completeTask(claim).get(5, TimeUnit.SECONDS);
     }
   }
+
+  // ---- Queue Depth Counter Tests ----
+
+  @Test
+  void testCountersInitiallyZero() throws ExecutionException, InterruptedException, TimeoutException {
+    assertThat(taskQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(taskQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(taskQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(taskQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+  }
+
+  @Test
+  void testEnqueueIncreasesUnclaimedCount() throws ExecutionException, InterruptedException, TimeoutException {
+    taskQueue.enqueue("task-1").get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+    assertThat(taskQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(taskQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    taskQueue.enqueue("task-2").get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+    assertThat(taskQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+
+    // Clean up
+    var c1 = taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    var c2 = taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    taskQueue.completeTask(c1).get(5, TimeUnit.SECONDS);
+    taskQueue.completeTask(c2).get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testClaimMovesUnclaimedToClaimed() throws ExecutionException, InterruptedException, TimeoutException {
+    taskQueue.enqueue("task-1").get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    var claim = taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(taskQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+    assertThat(taskQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    taskQueue.completeTask(claim).get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testCompleteDecreasesClaimed() throws ExecutionException, InterruptedException, TimeoutException {
+    taskQueue.enqueue("task-1").get(5, TimeUnit.SECONDS);
+    var claim = taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    taskQueue.completeTask(claim).get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(taskQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+  }
+
+  @Test
+  void testFailWithRetryCounters() throws ExecutionException, InterruptedException, TimeoutException {
+    taskQueue.enqueue("task-1").get(5, TimeUnit.SECONDS);
+    var claim = taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+    assertThat(taskQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+
+    taskQueue.failTask(claim).get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(taskQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    // Clean up
+    var c2 = taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    taskQueue.completeTask(c2).get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testFailToDlqCounters() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    dlqQueue.enqueue("task-1").get(5, TimeUnit.SECONDS);
+    assertThat(dlqQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    var claim = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    assertThat(dlqQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    dlqQueue.failTask(claim).get(5, TimeUnit.SECONDS);
+    assertThat(dlqQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(dlqQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+    assertThat(dlqQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+  }
+
+  @Test
+  void testRedriveFromDlqCounters() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    // Put task in DLQ
+    dlqQueue.enqueue("task-1").get(5, TimeUnit.SECONDS);
+    var claim = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    dlqQueue.failTask(claim).get(5, TimeUnit.SECONDS);
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+    assertThat(dlqQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+
+    // Redrive
+    dlqQueue.redriveFromDlq(1).get(5, TimeUnit.SECONDS);
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(dlqQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+    // Clean up
+    var c2 = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    dlqQueue.completeTask(c2).get(5, TimeUnit.SECONDS);
+  }
+
+  @Test
+  void testPurgeDlqCounters() throws ExecutionException, InterruptedException, TimeoutException {
+    var dlqConfig = TaskQueueConfig.<String>builder(database, directory, new StringSerializer())
+        .instantSource(InstantSource.system())
+        .maxAttempts(1)
+        .dlqEnabled(true)
+        .build();
+    var dlqQueue = TaskQueues.createSimpleTaskQueue(dlqConfig).get();
+
+    // Put 2 tasks in DLQ
+    for (int i = 1; i <= 2; i++) {
+      dlqQueue.enqueue("task-" + i).get(5, TimeUnit.SECONDS);
+      var claim = dlqQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+      dlqQueue.failTask(claim).get(5, TimeUnit.SECONDS);
+    }
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+
+    dlqQueue.purgeDlq().get(5, TimeUnit.SECONDS);
+    assertThat(dlqQueue.getDlqSize().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+  }
+
+  @Test
+  void testQueueDepthEqualsUnclaimedPlusClaimed() throws ExecutionException, InterruptedException, TimeoutException {
+    taskQueue.enqueue("task-1").get(5, TimeUnit.SECONDS);
+    taskQueue.enqueue("task-2").get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+
+    var c1 = taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+    assertThat(taskQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(1);
+    assertThat(taskQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+
+    var c2 = taskQueue.awaitAndClaimTask().get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getUnclaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+    assertThat(taskQueue.getClaimedCount().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+    assertThat(taskQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(2);
+
+    taskQueue.completeTask(c1).get(5, TimeUnit.SECONDS);
+    taskQueue.completeTask(c2).get(5, TimeUnit.SECONDS);
+    assertThat(taskQueue.getQueueDepth().get(5, TimeUnit.SECONDS)).isEqualTo(0);
+  }
+
+  @Test
+  void testCountersWithTransactionApi() throws ExecutionException, InterruptedException, TimeoutException {
+    long unclaimed =
+        database.runAsync(tr -> taskQueue.getUnclaimedCount(tr)).get(5, TimeUnit.SECONDS);
+    long claimed = database.runAsync(tr -> taskQueue.getClaimedCount(tr)).get(5, TimeUnit.SECONDS);
+    long depth = database.runAsync(tr -> taskQueue.getQueueDepth(tr)).get(5, TimeUnit.SECONDS);
+    long dlq = database.runAsync(tr -> taskQueue.getDlqSize(tr)).get(5, TimeUnit.SECONDS);
+
+    assertThat(unclaimed).isEqualTo(0);
+    assertThat(claimed).isEqualTo(0);
+    assertThat(depth).isEqualTo(0);
+    assertThat(dlq).isEqualTo(0);
+  }
 }
