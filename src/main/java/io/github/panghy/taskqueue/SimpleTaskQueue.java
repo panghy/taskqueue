@@ -357,4 +357,60 @@ public interface SimpleTaskQueue<T> {
    * @return A future that completes with a list of dead-lettered tasks.
    */
   CompletableFuture<List<DeadLetteredTask>> listDlqTasks(Transaction tr, int limit);
+
+  // ---- Queue depth counter methods ----
+
+  /**
+   * Gets the number of unclaimed tasks in the queue.
+   * Uses a standalone transaction.
+   *
+   * @return A future that completes with the number of unclaimed tasks.
+   */
+  default CompletableFuture<Long> getUnclaimedCount() {
+    return runAsync(this::getUnclaimedCount);
+  }
+
+  /**
+   * Gets the number of unclaimed tasks in the queue.
+   *
+   * @param tr The transaction to use for the operation.
+   * @return A future that completes with the number of unclaimed tasks.
+   */
+  CompletableFuture<Long> getUnclaimedCount(Transaction tr);
+
+  /**
+   * Gets the number of claimed (in-flight) tasks in the queue.
+   * Uses a standalone transaction.
+   *
+   * @return A future that completes with the number of claimed tasks.
+   */
+  default CompletableFuture<Long> getClaimedCount() {
+    return runAsync(this::getClaimedCount);
+  }
+
+  /**
+   * Gets the number of claimed (in-flight) tasks in the queue.
+   *
+   * @param tr The transaction to use for the operation.
+   * @return A future that completes with the number of claimed tasks.
+   */
+  CompletableFuture<Long> getClaimedCount(Transaction tr);
+
+  /**
+   * Gets the total queue depth (unclaimed + claimed tasks).
+   * Uses a standalone transaction.
+   *
+   * @return A future that completes with the total queue depth.
+   */
+  default CompletableFuture<Long> getQueueDepth() {
+    return runAsync(this::getQueueDepth);
+  }
+
+  /**
+   * Gets the total queue depth (unclaimed + claimed tasks).
+   *
+   * @param tr The transaction to use for the operation.
+   * @return A future that completes with the total queue depth.
+   */
+  CompletableFuture<Long> getQueueDepth(Transaction tr);
 }
