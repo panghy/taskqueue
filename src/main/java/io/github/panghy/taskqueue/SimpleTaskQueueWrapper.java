@@ -98,4 +98,19 @@ public class SimpleTaskQueueWrapper<T> implements SimpleTaskQueue<T> {
   public CompletableFuture<List<DeadLetteredTask>> listDlqTasks(Transaction tr, int limit) {
     return taskQueue.listDlqTasks(tr, limit);
   }
+
+  @Override
+  public CompletableFuture<Long> getUnclaimedCount(Transaction tr) {
+    return taskQueue.getUnclaimedCount(tr);
+  }
+
+  @Override
+  public CompletableFuture<Long> getClaimedCount(Transaction tr) {
+    return taskQueue.getClaimedCount(tr);
+  }
+
+  @Override
+  public CompletableFuture<Long> getQueueDepth(Transaction tr) {
+    return taskQueue.getQueueDepth(tr);
+  }
 }
