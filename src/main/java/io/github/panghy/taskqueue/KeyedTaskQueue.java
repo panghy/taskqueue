@@ -31,6 +31,8 @@ import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -59,6 +61,12 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   private static final String METADATA_KEY = "metadata";
   private static final byte[] ONE = new byte[] {0x01};
 
+  // Counter key names for atomic FDB counters
+  private static final byte[] COUNTER_KEY_UNCLAIMED = "unclaimed".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+  private static final byte[] COUNTER_KEY_CLAIMED = "claimed".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+  private static final byte[] COUNTER_KEY_DLQ = "dlq".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+  private static final byte[] ZERO_BYTES = encodeLittleEndianLong(0);
+
   // OpenTelemetry instrumentation - instance fields
   private final Tracer tracer;
   private final Meter meter;
@@ -85,8 +93,14 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   private final DirectorySubspace claimedTasks;
   private final DirectorySubspace taskKeys;
   private final DirectorySubspace dlqTasks;
+  private final DirectorySubspace counters;
   private final byte[] watchKey;
   private final String queuePath;
+
+  // Pre-computed counter keys in the counters subspace
+  private final byte[] unclaimedCounterKey;
+  private final byte[] claimedCounterKey;
+  private final byte[] dlqCounterKey;
 
   /**
    * Private constructor. Use {@link #createOrOpen(TaskQueueConfig, TransactionContext)} to create an instance.
@@ -97,13 +111,20 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
       DirectorySubspace claimedTasks,
       DirectorySubspace taskKeys,
       DirectorySubspace dlqTasks,
+      DirectorySubspace counters,
       byte[] watchKey) {
     this.config = config;
     this.unclaimedTasks = unclaimedTasks;
     this.claimedTasks = claimedTasks;
     this.taskKeys = taskKeys;
     this.dlqTasks = dlqTasks;
+    this.counters = counters;
     this.watchKey = watchKey;
+
+    // Pre-compute counter keys
+    this.unclaimedCounterKey = counters.pack(Tuple.from(COUNTER_KEY_UNCLAIMED));
+    this.claimedCounterKey = counters.pack(Tuple.from(COUNTER_KEY_CLAIMED));
+    this.dlqCounterKey = counters.pack(Tuple.from(COUNTER_KEY_DLQ));
 
     // Get the queue path from the directory
     List<String> pathComponents = config.getDirectory().getPath();
@@ -171,19 +192,21 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
     var claimedTaskF = config.getDirectory().createOrOpen(context, List.of("claimed_tasks"));
     var taskKeyF = config.getDirectory().createOrOpen(context, List.of("task_keys"));
     var dlqF = config.getDirectory().createOrOpen(context, List.of("dlq"));
+    var countersF = config.getDirectory().createOrOpen(context, List.of("counters"));
     var watchKeyF =
         config.getDirectory().createOrOpen(context, List.of("watch")).thenApply(Subspace::getKey);
     var watchKeyWriteF = watchKeyF.thenAccept(watchKey -> context.run(tr -> {
       tr.set(watchKey, ONE);
       return null;
     }));
-    return allOf(unclaimedTaskF, claimedTaskF, taskKeyF, dlqF, watchKeyF, watchKeyWriteF)
+    return allOf(unclaimedTaskF, claimedTaskF, taskKeyF, dlqF, countersF, watchKeyF, watchKeyWriteF)
         .thenApply(v -> new KeyedTaskQueue<>(
             config,
             unclaimedTaskF.join(),
             claimedTaskF.join(),
             taskKeyF.join(),
             dlqF.join(),
+            countersF.join(),
             watchKeyF.join()));
   }
 
@@ -277,6 +300,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         Task taskProto = createNewTaskProto(
             taskUuidBS, taskKeyBytes, setMetadataF.join().getHighestVersionSeen());
         storeUnclaimedTask(tr, visibleTime, taskUuid, taskProto);
+        incrementCounter(tr, unclaimedCounterKey, 1);
         span.addEvent("Task stored in unclaimed queue");
       } else {
         span.addEvent("Task has current claim, stored as new version");
@@ -453,6 +477,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
             LOGGER.debug("Completing task: {}", describeTask(taskUuid, taskClaim.task()));
             // remove all versions of the task (+ metadata).
             tr.clear(Range.startsWith(taskKeys.pack(taskKeyB)));
+            incrementCounter(tr, claimedCounterKey, -1);
             // Notify awaitQueueEmpty watchers
             incrementWatchKey(tr);
             return completedFuture(null);
@@ -482,6 +507,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                   expectedExecutionTime,
                   bytesToUuid(taskKeyProto.getTaskUuid().toByteArray()),
                   newTaskProto);
+              incrementCounter(tr, claimedCounterKey, -1);
+              incrementCounter(tr, unclaimedCounterKey, 1);
               TaskKeyMetadata updatedTaskKeyMetadataProto = taskMetadataProto.toBuilder()
                   .clearCurrentClaim()
                   .build();
@@ -669,6 +696,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                             .getTaskUuid()
                             .toByteArray())),
                     dlqEntry.toByteArray());
+                incrementCounter(tr, dlqCounterKey, 1);
                 dlqAdded.add(1, Attributes.of(QUEUE_PATH, queuePath));
                 LOGGER.info(
                     "Task {} moved to DLQ after {} attempts.",
@@ -677,6 +705,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               }
               // clear all versions of the task (+ metadata).
               tr.clear(Range.startsWith(taskKeys.pack(taskKeyB)));
+              incrementCounter(tr, claimedCounterKey, -1);
               // notify watchers that the queue has changed (and may now be empty).
               incrementWatchKey(tr);
             } else {
@@ -690,6 +719,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               Instant visibleTime =
                   toJavaTimestamp(taskClaim.taskKeyProto().getExpectedExecutionTime());
               storeUnclaimedTask(tr, visibleTime, taskUuid, updatedTaskProto);
+              incrementCounter(tr, claimedCounterKey, -1);
+              incrementCounter(tr, unclaimedCounterKey, 1);
               var updatedTaskMetadataProto = taskMetadataProto.toBuilder()
                   .clearCurrentClaim()
                   .build();
@@ -716,6 +747,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
                   visibleTime,
                   bytesToUuid(latestTaskKey.getTaskUuid().toByteArray()),
                   updatedTaskProto);
+              incrementCounter(tr, claimedCounterKey, -1);
+              incrementCounter(tr, unclaimedCounterKey, 1);
               var updatedTaskMetadataProto = taskMetadataProto.toBuilder()
                   .clearCurrentClaim()
                   .build();
@@ -778,6 +811,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               bytesToUuid(taskProto.getTaskUuid().toByteArray()));
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKey.toByteArray(), taskProto.getTaskVersion())));
+          incrementCounter(tr, unclaimedCounterKey, -1);
           return Optional.empty();
         }
         TaskKey taskKeyProto = taskKeyF.join();
@@ -795,6 +829,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           LOGGER.warn("Task {} has reached max attempts: {}", describeTask(taskUuid, taskObj), attempts);
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKey.toByteArray(), taskProto.getTaskVersion())));
+          incrementCounter(tr, unclaimedCounterKey, -1);
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
           LOGGER.warn(
@@ -824,6 +859,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         storeClaimedTask(tr, deadline, taskUuid, updatedTaskProto);
         byte[] taskKeyB = taskKey.toByteArray();
         storeTaskMetadata(tr, taskKeyB, updatedTaskKeyMetadataProto);
+        incrementCounter(tr, unclaimedCounterKey, -1);
+        incrementCounter(tr, claimedCounterKey, 1);
         LOGGER.debug("Claiming task: {} with claim: {}", describeTask(taskUuid, taskObj), claimUuid);
         return Optional.of(TaskClaim.<K, T>builder()
             .taskProto(updatedTaskProto)
@@ -900,6 +937,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
               bytesToUuid(taskProto.getTaskUuid().toByteArray()));
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), taskProto.getTaskVersion())));
+          incrementCounter(tr, claimedCounterKey, -1);
           return Optional.empty();
         }
         TaskKey latestTaskKey = highestTaskKeyF.join();
@@ -927,6 +965,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
           LOGGER.warn("Task {} has reached max attempts: {}", describeTask(taskUuid, taskObj), attempts);
           tr.clear(taskKV.getKey());
           tr.clear(taskKeys.pack(Tuple.from(taskKeyBytes.toByteArray(), taskProto.getTaskVersion())));
+          incrementCounter(tr, claimedCounterKey, -1);
           return Optional.empty();
         } else if (taskProto.getTaskVersion() != taskKeyMetadataProto.getHighestVersionSeen()) {
           LOGGER.warn(
@@ -983,6 +1022,71 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
 
   private void incrementWatchKey(Transaction tr) {
     tr.mutate(MutationType.ADD, watchKey, ONE);
+  }
+
+  /**
+   * Atomically increments a counter by the given delta using FDB's atomic ADD mutation.
+   *
+   * @param tr         the transaction to use
+   * @param counterKey the pre-computed counter key in the counters subspace
+   * @param delta      the amount to add (can be negative for decrements)
+   */
+  private void incrementCounter(Transaction tr, byte[] counterKey, long delta) {
+    tr.mutate(MutationType.ADD, counterKey, encodeLittleEndianLong(delta));
+  }
+
+  /**
+   * Reads the current value of a counter.
+   *
+   * @param tr         the transaction to use
+   * @param counterKey the pre-computed counter key in the counters subspace
+   * @return a future that completes with the counter value (0 if the key doesn't exist)
+   */
+  CompletableFuture<Long> readCounter(Transaction tr, byte[] counterKey) {
+    return tr.get(counterKey).thenApply(v -> {
+      if (v == null) {
+        return 0L;
+      }
+      return decodeLittleEndianLong(v);
+    });
+  }
+
+  /**
+   * Encodes a long value as a little-endian byte array (FDB atomic ADD format).
+   */
+  static byte[] encodeLittleEndianLong(long value) {
+    return ByteBuffer.allocate(8)
+        .order(ByteOrder.LITTLE_ENDIAN)
+        .putLong(value)
+        .array();
+  }
+
+  /**
+   * Decodes a little-endian byte array to a long value.
+   */
+  static long decodeLittleEndianLong(byte[] bytes) {
+    return ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).getLong();
+  }
+
+  /**
+   * Returns the pre-computed counter key for unclaimed tasks.
+   */
+  byte[] getUnclaimedCounterKey() {
+    return unclaimedCounterKey;
+  }
+
+  /**
+   * Returns the pre-computed counter key for claimed tasks.
+   */
+  byte[] getClaimedCounterKey() {
+    return claimedCounterKey;
+  }
+
+  /**
+   * Returns the pre-computed counter key for DLQ tasks.
+   */
+  byte[] getDlqCounterKey() {
+    return dlqCounterKey;
   }
 
   private CompletableFuture<TaskKeyMetadata> getTaskMetadataAsync(Transaction tr, ByteString taskKey) {
@@ -1246,6 +1350,7 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
         K taskKey = config.getKeySerializer().deserialize(dlqEntry.getTaskKey());
         T task = config.getTaskSerializer().deserialize(dlqEntry.getTask());
         tr.clear(kv.getKey());
+        incrementCounter(tr, dlqCounterKey, -1);
         chain = chain.thenCompose(v -> enqueue(tr, taskKey, task, Duration.ZERO, config.getDefaultTtl())
             .thenApply(m -> null));
         redriven++;
@@ -1263,9 +1368,8 @@ public class KeyedTaskQueue<K, T> implements TaskQueue<K, T> {
   @Override
   public CompletableFuture<Void> purgeDlq(Transaction tr) {
     tr.clear(dlqTasks.range());
-    // Note: we intentionally skip counting DLQ entries before purging to avoid
-    // scanning the entire DLQ, which can be expensive for large queues and risk
-    // transaction size/time limits.
+    // Reset the DLQ counter to 0 — no need to read the current value.
+    tr.set(dlqCounterKey, ZERO_BYTES);
     return completedFuture(null);
   }
 
