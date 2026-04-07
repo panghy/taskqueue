@@ -123,6 +123,6 @@ This is a distributed task queue library backed by FoundationDB. The key archite
 
 ## Code Style
 - Uses Palantir Java Format via Spotless
-- 80% line coverage requirement
-- 70% branch coverage requirement
+- 90% line coverage requirement
+- 75% branch coverage requirement
 - Protobuf generated classes are excluded from coverage

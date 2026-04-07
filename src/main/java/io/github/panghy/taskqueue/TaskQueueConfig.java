@@ -88,6 +88,13 @@ public class TaskQueueConfig<K, T> {
    */
   @Getter
   private final InstantSource instantSource;
+  /**
+   * -- GETTER --
+   * Gets the listener for task queue lifecycle events.
+   * This listener is invoked when tasks are exhausted, expired, or reclaimed.
+   */
+  @Getter
+  private final TaskQueueListener<K, T> listener;
 
   /**
    * -- GETTER --
@@ -119,6 +126,7 @@ public class TaskQueueConfig<K, T> {
         Objects.requireNonNull(builder.taskNameExtractor, "taskNameExtractor must not be null");
     this.estimatedWorkerCount = builder.estimatedWorkerCount;
     this.instantSource = Objects.requireNonNull(builder.instantSource, "instantSource must not be null");
+    this.listener = builder.listener;
     this.dlqEnabled = builder.dlqEnabled;
     this.dlqRedriveBatchSize = builder.dlqRedriveBatchSize;
 
@@ -190,9 +198,9 @@ public class TaskQueueConfig<K, T> {
   }
 
   public static class Builder<K, T> {
-    public Function<T, String> taskNameExtractor = Object::toString;
-    public int estimatedWorkerCount = 1;
-    public Database database;
+    private Function<T, String> taskNameExtractor = Object::toString;
+    private int estimatedWorkerCount = 1;
+    private Database database;
     private InstantSource instantSource = InstantSource.system();
     private Directory directory;
     private Duration defaultTtl = Duration.ofMinutes(5);
@@ -200,6 +208,7 @@ public class TaskQueueConfig<K, T> {
     private Duration defaultThrottle = Duration.ofSeconds(1);
     private TaskSerializer<K> keySerializer;
     private TaskSerializer<T> taskSerializer;
+    private TaskQueueListener<K, T> listener = new TaskQueueListener<>() {};
     private boolean dlqEnabled = false;
     private int dlqRedriveBatchSize = 100;
 
@@ -287,6 +296,15 @@ public class TaskQueueConfig<K, T> {
      */
     public Builder<K, T> taskSerializer(TaskSerializer<T> taskSerializer) {
       this.taskSerializer = taskSerializer;
+      return this;
+    }
+
+    /**
+     * Sets the listener for task queue lifecycle events.
+     * Default: no-op listener
+     */
+    public Builder<K, T> listener(TaskQueueListener<K, T> listener) {
+      this.listener = Objects.requireNonNull(listener, "listener must not be null");
       return this;
     }
 

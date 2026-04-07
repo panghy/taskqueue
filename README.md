@@ -42,7 +42,7 @@ import com.apple.foundationdb.FDB;
 import com.apple.foundationdb.directory.DirectoryLayer;
 import io.github.panghy.taskqueue.KeyedTaskQueue;
 import io.github.panghy.taskqueue.TaskQueueConfig;
-import io.github.panghy.taskqueue.serializers.StringSerializer;
+import io.github.panghy.taskqueue.StringSerializer;
 import java.util.concurrent.CompletableFuture;
 
 // Initialize FoundationDB
