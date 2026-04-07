@@ -87,7 +87,7 @@ public interface BaseTaskQueue<K, T> extends AutoCloseable {
    * @return A future that completes when the task has been failed.
    */
   default CompletableFuture<Void> failTask(TaskClaim<K, T> taskClaim) {
-    return runAsync(tr -> failTask(tr, taskClaim));
+    return failTask(taskClaim, null);
   }
 
   /**
@@ -97,7 +97,34 @@ public interface BaseTaskQueue<K, T> extends AutoCloseable {
    * @param taskClaim The task claim.
    * @return A future that completes when the task has been failed.
    */
-  CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim);
+  default CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim) {
+    return failTask(tr, taskClaim, null);
+  }
+
+  /**
+   * Fails the task with a failure reason. This will cause the task to be retried at the current
+   * known highest version. If the task has exhausted its max attempts and DLQ is enabled, the
+   * failure reason will be stored with the dead-lettered task.
+   *
+   * @param taskClaim     The task claim.
+   * @param failureReason The reason for the failure (may be null).
+   * @return A future that completes when the task has been failed.
+   */
+  default CompletableFuture<Void> failTask(TaskClaim<K, T> taskClaim, String failureReason) {
+    return runAsync(tr -> failTask(tr, taskClaim, failureReason));
+  }
+
+  /**
+   * Fails the task with a failure reason. This will cause the task to be retried at the current
+   * known highest version. If the task has exhausted its max attempts and DLQ is enabled, the
+   * failure reason will be stored with the dead-lettered task.
+   *
+   * @param tr            The transaction to use for the operation.
+   * @param taskClaim     The task claim.
+   * @param failureReason The reason for the failure (may be null).
+   * @return A future that completes when the task has been failed.
+   */
+  CompletableFuture<Void> failTask(Transaction tr, TaskClaim<K, T> taskClaim, String failureReason);
 
   /**
    * Extends the TTL for a claimed task. This allows a worker to request more time to process a task.
