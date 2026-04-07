@@ -3,8 +3,10 @@ package io.github.panghy.taskqueue;
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.Transaction;
 import com.apple.foundationdb.TransactionContext;
+import io.github.panghy.taskqueue.proto.DeadLetteredTask;
 import io.github.panghy.taskqueue.proto.TaskKeyMetadata;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -48,8 +50,8 @@ public class SimpleTaskQueueWrapper<T> implements SimpleTaskQueue<T> {
   }
 
   @Override
-  public CompletableFuture<Void> failTask(Transaction tr, TaskClaim<UUID, T> taskClaim) {
-    return taskQueue.failTask(tr, taskClaim);
+  public CompletableFuture<Void> failTask(Transaction tr, TaskClaim<UUID, T> taskClaim, String failureReason) {
+    return taskQueue.failTask(tr, taskClaim, failureReason);
   }
 
   @Override
@@ -80,5 +82,40 @@ public class SimpleTaskQueueWrapper<T> implements SimpleTaskQueue<T> {
   @Override
   public void close() {
     taskQueue.close();
+  }
+
+  @Override
+  public CompletableFuture<Integer> redriveFromDlq(Transaction tr, int count) {
+    return taskQueue.redriveFromDlq(tr, count);
+  }
+
+  @Override
+  public CompletableFuture<Void> purgeDlq(Transaction tr) {
+    return taskQueue.purgeDlq(tr);
+  }
+
+  @Override
+  public CompletableFuture<Long> getDlqSize(Transaction tr) {
+    return taskQueue.getDlqSize(tr);
+  }
+
+  @Override
+  public CompletableFuture<List<DeadLetteredTask>> listDlqTasks(Transaction tr, int limit) {
+    return taskQueue.listDlqTasks(tr, limit);
+  }
+
+  @Override
+  public CompletableFuture<Long> getUnclaimedCount(Transaction tr) {
+    return taskQueue.getUnclaimedCount(tr);
+  }
+
+  @Override
+  public CompletableFuture<Long> getClaimedCount(Transaction tr) {
+    return taskQueue.getClaimedCount(tr);
+  }
+
+  @Override
+  public CompletableFuture<Long> getQueueDepth(Transaction tr) {
+    return taskQueue.getQueueDepth(tr);
   }
 }

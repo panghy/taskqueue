@@ -1,7 +1,9 @@
 package io.github.panghy.taskqueue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.apple.foundationdb.Database;
 import com.apple.foundationdb.FDB;
@@ -125,6 +127,70 @@ class TaskQueueConfigTest {
     assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
             db, directory, new StringSerializer(), new StringSerializer())
         .estimatedWorkerCount(-1)
+        .build());
+  }
+
+  @Test
+  void testDlqDisabledByDefault() {
+    TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .build();
+
+    assertFalse(config.isDlqEnabled());
+  }
+
+  @Test
+  void testDlqEnabled() {
+    TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .dlqEnabled(true)
+        .build();
+
+    assertTrue(config.isDlqEnabled());
+  }
+
+  @Test
+  void testDlqExplicitlyDisabled() {
+    TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .dlqEnabled(false)
+        .build();
+
+    assertFalse(config.isDlqEnabled());
+  }
+
+  @Test
+  void testDlqRedriveBatchSizeDefault() {
+    TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .build();
+
+    assertEquals(100, config.getDlqRedriveBatchSize());
+  }
+
+  @Test
+  void testDlqRedriveBatchSizeCustom() {
+    TaskQueueConfig<String, String> config = TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .dlqRedriveBatchSize(50)
+        .build();
+
+    assertEquals(50, config.getDlqRedriveBatchSize());
+  }
+
+  @Test
+  void testDlqRedriveBatchSizeZeroThrows() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .dlqRedriveBatchSize(0)
+        .build());
+  }
+
+  @Test
+  void testDlqRedriveBatchSizeNegativeThrows() {
+    assertThrows(IllegalArgumentException.class, () -> TaskQueueConfig.builder(
+            db, directory, new StringSerializer(), new StringSerializer())
+        .dlqRedriveBatchSize(-1)
         .build());
   }
 }

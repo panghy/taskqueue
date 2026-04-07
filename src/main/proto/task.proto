@@ -85,3 +85,28 @@ message TaskKeyMetadata {
   // Current claim for the task key
   optional CurrentClaim current_claim = 2;
 }
+
+// DeadLetteredTask represents a task that has been moved to the dead letter queue
+// after exhausting all retry attempts.
+message DeadLetteredTask {
+  // Unique identifier of the original task (UUID stored as 16 bytes)
+  bytes task_uuid = 1;
+
+  // The task key bytes
+  bytes task_key = 2;
+
+  // The task payload
+  bytes task = 3;
+
+  // When the task was originally created
+  google.protobuf.Timestamp creation_time = 4;
+
+  // When the task was moved to the dead letter queue
+  google.protobuf.Timestamp dead_lettered_time = 5;
+
+  // Last known failure reason
+  string failure_reason = 6;
+
+  // Number of attempts before dead-lettering
+  int64 attempts = 7;
+}

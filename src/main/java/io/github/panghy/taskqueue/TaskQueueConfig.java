@@ -96,6 +96,24 @@ public class TaskQueueConfig<K, T> {
   @Getter
   private final TaskQueueListener<K, T> listener;
 
+  /**
+   * -- GETTER --
+   * Gets whether the dead letter queue is enabled for this task queue.
+   * When enabled, tasks that exceed maxAttempts will be moved to a DLQ
+   * instead of being discarded.
+   */
+  @Getter
+  private final boolean dlqEnabled;
+
+  /**
+   * -- GETTER --
+   * Gets the batch size used for multi-transaction DLQ redrive operations.
+   * Each batch is processed in a separate transaction to avoid exceeding
+   * FoundationDB transaction limits.
+   */
+  @Getter
+  private final int dlqRedriveBatchSize;
+
   private TaskQueueConfig(Builder<K, T> builder) {
     this.database = Objects.requireNonNull(builder.database, "database must not be null");
     this.directory = Objects.requireNonNull(builder.directory, "subspace must not be null");
@@ -109,6 +127,8 @@ public class TaskQueueConfig<K, T> {
     this.estimatedWorkerCount = builder.estimatedWorkerCount;
     this.instantSource = Objects.requireNonNull(builder.instantSource, "instantSource must not be null");
     this.listener = builder.listener;
+    this.dlqEnabled = builder.dlqEnabled;
+    this.dlqRedriveBatchSize = builder.dlqRedriveBatchSize;
 
     if (maxAttempts <= 0) {
       throw new IllegalArgumentException("maxAttempts must be positive");
@@ -121,6 +141,9 @@ public class TaskQueueConfig<K, T> {
     }
     if (estimatedWorkerCount <= 0) {
       throw new IllegalArgumentException("estimatedWorkerCount must be positive");
+    }
+    if (dlqRedriveBatchSize <= 0) {
+      throw new IllegalArgumentException("dlqRedriveBatchSize must be positive");
     }
   }
 
@@ -186,6 +209,8 @@ public class TaskQueueConfig<K, T> {
     private TaskSerializer<K> keySerializer;
     private TaskSerializer<T> taskSerializer;
     private TaskQueueListener<K, T> listener = new TaskQueueListener<>() {};
+    private boolean dlqEnabled = false;
+    private int dlqRedriveBatchSize = 100;
 
     private Builder(
         Database database,
@@ -280,6 +305,25 @@ public class TaskQueueConfig<K, T> {
      */
     public Builder<K, T> listener(TaskQueueListener<K, T> listener) {
       this.listener = Objects.requireNonNull(listener, "listener must not be null");
+      return this;
+    }
+
+    /**
+     * Sets whether the dead letter queue is enabled.
+     * When enabled, tasks that exceed maxAttempts will be moved to a DLQ.
+     * Default: false
+     */
+    public Builder<K, T> dlqEnabled(boolean dlqEnabled) {
+      this.dlqEnabled = dlqEnabled;
+      return this;
+    }
+
+    /**
+     * Sets the batch size for multi-transaction DLQ redrive operations.
+     * Default: 100
+     */
+    public Builder<K, T> dlqRedriveBatchSize(int dlqRedriveBatchSize) {
+      this.dlqRedriveBatchSize = dlqRedriveBatchSize;
       return this;
     }
 
